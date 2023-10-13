@@ -43,13 +43,14 @@ def _get_cosine_schedule_with_warmup_lr_lambda(
         return float(current_step - warmup_and_embedding_training_steps) / float(max(1, num_warmup_steps))
 
     # pure embedding training phase
+    # TODO perhaps change the denominator in order to NOT decay the LR to 0
     elif current_step < warmup_and_embedding_training_steps:
         numerator = float(current_step - num_warmup_steps)
         denominator = float(max(1, num_pure_embedding_training_steps))
+        # denominator = float(max(1, num_training_steps))
         progress = numerator / denominator
     # full training
     else:
-
         numerator = float(current_step - full_training_start_step)
         denominator = float(max(1, num_training_steps - full_training_start_step))
         progress = numerator / denominator
@@ -89,7 +90,7 @@ def run_clm(
     pure_embedding_training_percentage=10,
     warmup_percentage=10,
     num_train_epochs=1,
-    block_size=1024,
+    block_size=None,
     device="cuda",
     seed=42
 ):
@@ -232,7 +233,7 @@ def run_clm(
         optimizer=optimizer,
         num_warmup_steps=num_warmup_steps * gradient_accumulation_steps,
         num_training_steps=num_training_steps * gradient_accumulation_steps,
-        num_pure_embedding_training_steps=pure_embedding_training_steps  * gradient_accumulation_steps)
+        num_pure_embedding_training_steps=pure_embedding_training_steps * gradient_accumulation_steps)
 
     # Training
     total_batch_size = per_device_train_batch_size * gradient_accumulation_steps
