@@ -7,6 +7,3 @@ scikit-learn
 
 transformers==4.34
 accelerate==0.23.0
-
-# Bugfix for https://github.com/huggingface/datasets/issues/3310
-pyarrow==6.0.1

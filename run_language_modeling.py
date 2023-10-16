@@ -3,7 +3,6 @@ import os
 import math
 import json
 import logging
-from functools import partial
 
 import fire
 import datasets
@@ -18,6 +17,7 @@ from transformers import (
     set_seed,
     DataCollatorForLanguageModeling
 )
+from custom_lr_scheduler import get_custom_lr_scheduler
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
@@ -25,50 +25,6 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
-
-# TODO handle gradient accumulation
-def _get_cosine_schedule_with_warmup_lr_lambda(
-        current_step: int, *, num_warmup_steps: int, num_training_steps: int, num_cycles: float,
-        num_pure_embedding_training_steps: int
-):
-    warmup_and_embedding_training_steps = num_warmup_steps + num_pure_embedding_training_steps
-    full_training_start_step = num_warmup_steps + num_pure_embedding_training_steps + num_warmup_steps
-
-    # embedding training warmup phase
-    if current_step < num_warmup_steps:
-        return float(current_step) / float(max(1, num_warmup_steps))
-
-    # full training phase warmup phase
-    elif warmup_and_embedding_training_steps <= current_step < full_training_start_step:
-        return float(current_step - warmup_and_embedding_training_steps) / float(max(1, num_warmup_steps))
-
-    # pure embedding training phase
-    # TODO perhaps change the denominator in order to NOT decay the LR to 0
-    elif current_step < warmup_and_embedding_training_steps:
-        numerator = float(current_step - num_warmup_steps)
-        denominator = float(max(1, num_pure_embedding_training_steps))
-        # denominator = float(max(1, num_training_steps))
-        progress = numerator / denominator
-    # full training
-    else:
-        numerator = float(current_step - full_training_start_step)
-        denominator = float(max(1, num_training_steps - full_training_start_step))
-        progress = numerator / denominator
-    # cosine of 0 is 1, cosine of half pi is 0, cosine of pi is -1,
-    return max(0.0, 0.5 * (1.0 + math.cos(math.pi * float(num_cycles) * 2.0 * progress)))
-
-
-def get_custom_lr_scheduler(optimizer, num_warmup_steps, num_training_steps, num_pure_embedding_training_steps,
-                            num_cycles: float = 0.5):
-    lr_lambda = partial(
-        _get_cosine_schedule_with_warmup_lr_lambda,
-        num_warmup_steps=num_warmup_steps,
-        num_training_steps=num_training_steps,
-        num_pure_embedding_training_steps=num_pure_embedding_training_steps,
-        num_cycles=num_cycles
-    )
-
-    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
 def run_clm(
@@ -84,7 +40,8 @@ def run_clm(
     per_device_train_batch_size=8,
     per_device_eval_batch_size=8,
     learning_rate=3e-4,
-    full_training_learning_rate=10e-5,
+    full_training_learning_rate=1e-4,
+    min_lr=0.0,
     weight_decay=0.1,
     gradient_accumulation_steps = 1,
     pure_embedding_training_percentage=10,
@@ -179,7 +136,7 @@ def run_clm(
         max_train_samples = min(len(lm_dataset["train"]), max_train_samples)
         lm_dataset["train"] = lm_dataset["train"].select(range(max_train_samples))
     if max_eval_samples is not None:
-        max_eval_samples = min(len(lm_dataset["train"]), max_eval_samples)
+        max_eval_samples = min(len(lm_dataset["validation"]), max_eval_samples)
         lm_dataset["validation"] = lm_dataset["validation"].select(range(max_eval_samples))
 
     tokenizer.pad_token = tokenizer.eos_token
@@ -225,15 +182,17 @@ def run_clm(
     # LR Scheduler
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / gradient_accumulation_steps)
     num_training_steps = num_train_epochs * num_update_steps_per_epoch
-    # TODO num_warmup_steps should be calculated separately for embedding tuning and for full training
-    num_warmup_steps = math.ceil(num_training_steps * warmup_percentage / 100)
     pure_embedding_training_steps = math.ceil(num_training_steps * pure_embedding_training_percentage / 100)
+    warmup_embedding_steps = math.ceil(pure_embedding_training_steps * warmup_percentage / 100)
+    warmup_and_embedding_training_steps = warmup_embedding_steps + pure_embedding_training_steps
     # custom lr scheduler with cosine decay and one warmup phase each for the embedding training and the full training
     lr_scheduler = get_custom_lr_scheduler(
         optimizer=optimizer,
-        num_warmup_steps=num_warmup_steps * gradient_accumulation_steps,
-        num_training_steps=num_training_steps * gradient_accumulation_steps,
-        num_pure_embedding_training_steps=pure_embedding_training_steps * gradient_accumulation_steps)
+        warmup_percentage=warmup_percentage,
+        num_training_steps=num_training_steps,
+        num_pure_embedding_training_steps=pure_embedding_training_steps,
+        min_lr=min_lr
+    )
 
     # Training
     total_batch_size = per_device_train_batch_size * gradient_accumulation_steps
@@ -251,17 +210,17 @@ def run_clm(
     for epoch in range(num_train_epochs):
         model.train()
         total_loss = 0
+        step = 0
         for step, batch in enumerate(train_dataloader):
-            if transformer_layers_are_frozen and completed_steps >= num_warmup_steps + pure_embedding_training_steps:
-                before_lr = optimizer.param_groups[0]["lr"]
+            if transformer_layers_are_frozen and completed_steps >= warmup_and_embedding_training_steps:
                 # unfreeze transformer layers
                 for param in model.gpt_neox.parameters():
                     param.requires_grad = True
-                # TODO check if this actually works
-                for g in optimizer.param_groups:
-                    g["lr"] = full_training_learning_rate
+                # set new learning rate for full training and decay to 0.0 for the full training
+                lr_scheduler.base_lrs = [full_training_learning_rate for _ in lr_scheduler.base_lrs]
+                lr_scheduler.min_lr = 0.0   # TODO check if we want to decay to 0 for the full training
                 transformer_layers_are_frozen = False
-                logger.info(f"epoch {epoch}: step {completed_steps}: lr {before_lr} -> {full_training_learning_rate} unfreezing transformer layers")
+                logger.info(f"epoch {epoch}: step {completed_steps}: unfreezing transformer layers")
 
             batch = {k: v.to(model.device) for k, v in batch.items()}
             outputs = model(**batch)
