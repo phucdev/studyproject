@@ -1,27 +1,32 @@
 import json
-import fire
-import sys
+import argparse
 
 from datasets import load_dataset
 from tqdm.auto import tqdm
 from pathlib import Path
 
 
-def prepare_dataset(
-    dataset_name: str,
-    dataset_config_name: str,
-    output_dir: str,
-    subsample_size_mb: int = 1024,
-    valid_percent = 0.1
-):
-    # Adapted from https://github.com/CPJKU/wechsel/blob/main/legacy/prepare.py
-    subsample_size = 1024 * 1024 * subsample_size_mb  # in bytes
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset_name", type=str)
+    parser.add_argument("--dataset_config_name", type=str)
+    parser.add_argument("--output_dir", type=str)
+    parser.add_argument("--subsample_size_mb", type=int, default=1024)
+    parser.add_argument("--valid_percentage", type=int, default=10)
+    args = parser.parse_args()
+    return args
 
-    output_dir = Path(output_dir)
+
+def prepare_dataset():
+    args = parse_args()
+    # Adapted from https://github.com/CPJKU/wechsel/blob/main/legacy/prepare.py
+    subsample_size = 1024 * 1024 * args.subsample_size_mb  # in bytes
+
+    output_dir = Path(args.output_dir)
     output_dir.mkdir(exist_ok=True, parents=True)
 
     dataset = load_dataset(
-        dataset_name, dataset_config_name, split="train", streaming=True
+        args.dataset_name, args.dataset_config_name, split="train", streaming=True
     )
     dataset_iter = iter(dataset)
 
@@ -41,9 +46,9 @@ def prepare_dataset(
 
     with open(output_dir / "valid.json", "w") as f:
         size = 0
-        bar = tqdm(total=subsample_size * valid_percent)
+        bar = tqdm(total=subsample_size * args.valid_percent)
 
-        while size < subsample_size * valid_percent:
+        while size < subsample_size * args.valid_percent:
             entry = next(dataset_iter)
 
             entry_size = len(entry["text"].encode("utf-8"))
@@ -55,5 +60,4 @@ def prepare_dataset(
 
 
 if __name__ == "__main__":
-    fire.Fire(prepare_dataset)
-    sys.exit(0)
+    prepare_dataset()
