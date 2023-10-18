@@ -179,6 +179,11 @@ def run_clm(args):
         project="CLP study project",
         config=vars(args),
     )
+
+    # Set seed
+    if args.seed is not None:
+        set_seed(args.seed)
+
     # Load dataset
     if args.dataset_name:
         dataset = datasets.load_dataset(
@@ -239,7 +244,7 @@ def run_clm(args):
     )
 
     if args.block_size is None:
-        block_size = tokenizer.model_max_length
+        args.block_size = tokenizer.model_max_length
 
     # Main data processing function that will concatenate all texts from our dataset and generate chunks of block_size.
     def group_texts(examples):
@@ -278,7 +283,6 @@ def run_clm(args):
     )
 
     # Load pretrained model
-    set_seed(args.seed)
     config = AutoConfig.from_pretrained(args.model_name_or_path)
     model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path, config=config)
 
