@@ -131,7 +131,11 @@ def parse_args():
         "--block_size",
         type=int,
         default=None,
-        help="Optional input sequence length after tokenization."
+        help=(
+            "Optional input sequence length after tokenization. The training dataset will be truncated in block of"
+            " this size for training. Default to the model max input length for single sentence inputs (take into"
+            " account special tokens)."
+        ),
     )
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--seed", type=int, default=42)
@@ -140,11 +144,7 @@ def parse_args():
         "--checkpointing_steps",
         type=str,
         default=None,
-        help=(
-            "Optional input sequence length after tokenization. The training dataset will be truncated in block of"
-            " this size for training. Default to the model max input length for single sentence inputs (take into"
-            " account special tokens)."
-        ),
+        help="Whether the various states should be saved at the end of every n steps, or 'epoch' for each epoch."
     )
     parser.add_argument(
         "--resume_from_checkpoint",
@@ -322,6 +322,10 @@ def run_clm(args):
         min_lr=args.min_lr
     )
 
+    checkpointing_steps = args.checkpointing_steps
+    if checkpointing_steps is not None and checkpointing_steps.isdigit():
+        checkpointing_steps = int(checkpointing_steps)
+
     # Training
     total_batch_size = args.per_device_train_batch_size * args.gradient_accumulation_steps
     logger.info("***** Running training *****")
@@ -334,6 +338,31 @@ def run_clm(args):
 
     progress_bar = tqdm(range(num_training_steps))
     completed_steps = 0
+
+    # Potentially load in the weights and states from a previous save
+    if args.resume_from_checkpoint is not None:
+        logger.info(f"Resumed from checkpoint: {args.resume_from_checkpoint}")
+        checkpoint = torch.load(args.resume_from_checkpoint)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        epoch = checkpoint['epoch']
+        loss = checkpoint['loss']
+        # Extract `epoch_{i}` or `step_{i}`
+        training_difference = os.path.splitext(os.path.basename(args.resume_from_checkpoint))[0]
+
+        if "epoch" in training_difference:
+            starting_epoch = int(training_difference.replace("epoch_", "")) + 1
+            resume_step = None
+            completed_steps = starting_epoch * num_update_steps_per_epoch
+        else:
+            # need to multiply `gradient_accumulation_steps` to reflect real steps
+            resume_step = int(training_difference.replace("step_", "")) * args.gradient_accumulation_steps
+            starting_epoch = resume_step // len(train_dataloader)
+            completed_steps = resume_step // args.gradient_accumulation_steps
+            resume_step -= starting_epoch * len(train_dataloader)
+
+    # update the progress_bar if load from checkpoint
+    progress_bar.update(completed_steps)
 
     for epoch in range(args.num_train_epochs):
         model.train()
@@ -373,6 +402,18 @@ def run_clm(args):
                 completed_steps += 1
                 logger.info(f"epoch {epoch}: step {completed_steps}: lr {before_lr} -> {after_lr} loss {loss}")
 
+            if isinstance(checkpointing_steps, int):
+                if completed_steps % checkpointing_steps == 0:
+                    output_file = f"step_{completed_steps}.pt"
+                    if args.output_dir is not None:
+                        output_file = os.path.join(args.output_dir, output_file)
+                    torch.save({
+                        'epoch': epoch,
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'loss': loss,
+                    }, output_file)
+
         # gradient accumulation for the last batch
         if (step + 1) % args.gradient_accumulation_steps != 0:
             wandb.log({
@@ -411,11 +452,22 @@ def run_clm(args):
             "eval/perplexity": perplexity,
         })
 
-        model.save_pretrained(args.output_dir)
-        with open(os.path.join(args.output_dir, "all_results.json"), "w") as f:
-            json.dump({"perplexity": perplexity}, f)
+        if args.checkpointing_steps == "epoch":
+            output_file = f"epoch_{epoch}.pt"
+            if args.output_dir is not None:
+                output_file = os.path.join(args.output_dir, output_file)
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': loss,
+            }, output_file)
 
-        wandb.finish()
+    model.save_pretrained(args.output_dir)
+    with open(os.path.join(args.output_dir, "all_results.json"), "w") as f:
+        json.dump({"perplexity": perplexity}, f)
+
+    wandb.finish()
 
 
 def main():
