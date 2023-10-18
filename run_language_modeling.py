@@ -392,7 +392,7 @@ def run_clm(args):
             # We keep track of the loss at each epoch
             total_loss += loss.detach().float()
             loss.backward()
-            if (step + 1) % args.gradient_accumulation_steps == 0:
+            if ((step + 1) % args.gradient_accumulation_steps == 0) or (step + 1 == len(train_dataloader)):
                 wandb.log({
                     "train/train_loss": loss,
                     "train/perplexity": perplexity,
@@ -417,21 +417,6 @@ def run_clm(args):
                         'optimizer_state_dict': optimizer.state_dict(),
                         'loss': loss,
                     }, output_file)
-
-        # gradient accumulation for the last batch
-        if (step + 1) % args.gradient_accumulation_steps != 0:
-            wandb.log({
-                "train/train_loss": loss,
-                "train/perplexity": perplexity,
-            })
-            before_lr = optimizer.param_groups[0]["lr"]
-            optimizer.step()
-            lr_scheduler.step()
-            after_lr = optimizer.param_groups[0]["lr"]
-            optimizer.zero_grad()
-            progress_bar.update(1)
-            completed_steps += 1
-            logger.info(f"epoch {epoch}: step {completed_steps}: lr {before_lr} -> {after_lr} loss {loss}")
 
         model.eval()
         losses = []
