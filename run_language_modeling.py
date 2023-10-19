@@ -7,6 +7,7 @@ import logging
 import datasets
 import torch
 import wandb
+import accelerate
 
 from tqdm.auto import tqdm
 from torch.utils.data import DataLoader
@@ -139,7 +140,6 @@ def parse_args():
     )
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--push_to_hub", action="store_true", help="Whether or not to push the model to the Hub.")
     parser.add_argument(
         "--checkpointing_steps",
         type=str,
@@ -183,6 +183,10 @@ def run_clm(args):
     # Set seed
     if args.seed is not None:
         set_seed(args.seed)
+
+    # Create output directory if needed
+    if args.output_dir is not None:
+        os.makedirs(args.output_dir, exist_ok=True)
 
     # Load dataset
     if args.dataset_name:
@@ -355,7 +359,7 @@ def run_clm(args):
         training_difference = os.path.splitext(os.path.basename(args.resume_from_checkpoint))[0]
 
         if "epoch" in training_difference:
-            starting_epoch = int(training_difference.replace("epoch_", "")) + 1
+            starting_epoch = epoch + 1
             resume_step = None
             completed_steps = starting_epoch * num_update_steps_per_epoch
         else:
@@ -371,8 +375,12 @@ def run_clm(args):
     for epoch in range(args.num_train_epochs):
         model.train()
         total_loss = 0
-        step = 0
-        for step, batch in enumerate(train_dataloader):
+        if args.resume_from_checkpoint and epoch == starting_epoch and resume_step is not None:
+            # We skip the first `n` batches in the dataloader when resuming from a checkpoint
+            active_dataloader = accelerate.data_loader.skip_first_batches(train_dataloader, resume_step)
+        else:
+            active_dataloader = train_dataloader
+        for step, batch in enumerate(active_dataloader):
             if transformer_layers_are_frozen and completed_steps >= warmup_and_embedding_training_steps:
                 # unfreeze transformer layers
                 for param in model.gpt_neox.parameters():
