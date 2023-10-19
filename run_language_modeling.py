@@ -4,10 +4,10 @@ import math
 import json
 import logging
 
-import datasets
 import torch
-import wandb
+import datasets
 import accelerate
+import wandb
 
 from tqdm.auto import tqdm
 from torch.utils.data import DataLoader
@@ -35,14 +35,24 @@ def parse_args():
         "--model_name_or_path",
         type=str,
         help="Path to pretrained model or model identifier from huggingface.co/models.",
-        required=True
+        default=None
     )
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="output",
-        help="The output directory where the model checkpoints will be written.",
-        required=True
+        default=None,
+        help="The output directory where the model checkpoints will be written."
+    )
+    parser.add_argument(
+        "--preprocessed_dataset_path",
+        type=str,
+        default=None,
+        help="Path to preprocessed dataset.")
+    parser.add_argument(
+        "--save_preprocessed_dataset_path",
+        type=str,
+        default=None,
+        help="Path to save preprocessed dataset."
     )
     parser.add_argument(
         "--train_file", type=str, default=None, help="A csv, txt or a json file containing the training data."
@@ -138,6 +148,12 @@ def parse_args():
             " account special tokens)."
         ),
     )
+    parser.add_argument(
+        "--preprocessing_num_workers",
+        type=int,
+        default=None,
+        help="The number of processes to use for the preprocessing.",
+    )
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
@@ -167,10 +183,6 @@ def parse_args():
             if extension not in ["csv", "json", "txt"]:
                 raise ValueError("`validation_file` should be a csv, json or txt file.")
 
-    if args.push_to_hub:
-        if args.output_dir is None:
-            raise ValueError("Need an `output_dir` to create a repo when `--push_to_hub` is passed.")
-
     return args
 
 
@@ -188,86 +200,90 @@ def run_clm(args):
     if args.output_dir is not None:
         os.makedirs(args.output_dir, exist_ok=True)
 
-    # Load dataset
-    if args.dataset_name:
-        dataset = datasets.load_dataset(
-            args.dataset_name,
-            args.dataset_config_name
-        )
-        if "validation" not in dataset.keys():
-            dataset["validation"] = datasets.load_dataset(
-                args.dataset_name,
-                args.dataset_config_name,
-                split=f"train[:{args.validation_split_percentage}%]",
-            )
-            dataset["train"] = datasets.load_dataset(
-                args.dataset_name,
-                args.dataset_config_name,
-                split=f"train[{args.validation_split_percentage}%:]",
-            )
-    else:
-        data_files = {}
-        if args.train_file is not None:
-            data_files["train"] = args.train_file
-        if args.validation_file is not None:
-            data_files["validation"] = args.validation_file
-        extension = (
-            args.train_file.split(".")[-1]
-            if args.train_file is not None
-            else args.validation_file.split(".")[-1]
-        )
-        if extension == "txt":
-            extension = "text"
-        dataset = datasets.load_dataset(
-            extension,
-            data_files=data_files
-        )
-        if "validation" not in dataset.keys():
-            dataset["validation"] = datasets.load_dataset(
-                extension,
-                data_files=data_files,
-                split=f"train[:{args.validation_split_percentage}%]"
-            )
-            dataset["train"] = datasets.load_dataset(
-                extension,
-                data_files=data_files,
-                split=f"train[{args.validation_split_percentage}%:]"
-            )
-
-    # Preprocess
+    # Load and preprocess dataset
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
-
-    def preprocess_function(examples):
-        return tokenizer([x for x in examples["text"]])
-
-    tokenized_dataset = dataset.map(
-        preprocess_function,
-        batched=True,
-        num_proc=1,
-        remove_columns=dataset["train"].column_names,
-    )
-
     if args.block_size is None:
         args.block_size = tokenizer.model_max_length
 
-    # Main data processing function that will concatenate all texts from our dataset and generate chunks of block_size.
-    def group_texts(examples):
-        # Concatenate all texts.
-        concatenated_examples = {k: sum(examples[k], []) for k in examples.keys()}
-        total_length = len(concatenated_examples[list(examples.keys())[0]])
-        # We drop the small remainder, we could add padding if the model supported it instead of this drop, you can
-        # customize this part to your needs.
-        if total_length >= args.block_size:
-            total_length = (total_length // args.block_size) * args.block_size
-        # Split by chunks of block_size.
-        result = {
-            k: [t[i: i + args.block_size] for i in range(0, total_length, args.block_size)]
-            for k, t in concatenated_examples.items()
-        }
-        result["labels"] = result["input_ids"].copy()
-        return result
+    if args.preprocessed_dataset_path is not None:
+        lm_dataset = datasets.load_from_disk(args.preprocessed_dataset_path)
+    else:
+        if args.dataset_name:
+            dataset = datasets.load_dataset(
+                args.dataset_name,
+                args.dataset_config_name
+            )
+            if "validation" not in dataset.keys():
+                dataset["validation"] = datasets.load_dataset(
+                    args.dataset_name,
+                    args.dataset_config_name,
+                    split=f"train[:{args.validation_split_percentage}%]",
+                )
+                dataset["train"] = datasets.load_dataset(
+                    args.dataset_name,
+                    args.dataset_config_name,
+                    split=f"train[{args.validation_split_percentage}%:]",
+                )
+        else:
+            data_files = {}
+            if args.train_file is not None:
+                data_files["train"] = args.train_file
+            if args.validation_file is not None:
+                data_files["validation"] = args.validation_file
+            extension = (
+                args.train_file.split(".")[-1]
+                if args.train_file is not None
+                else args.validation_file.split(".")[-1]
+            )
+            if extension == "txt":
+                extension = "text"
+            dataset = datasets.load_dataset(
+                extension,
+                data_files=data_files
+            )
+            if "validation" not in dataset.keys():
+                dataset["validation"] = datasets.load_dataset(
+                    extension,
+                    data_files=data_files,
+                    split=f"train[:{args.validation_split_percentage}%]"
+                )
+                dataset["train"] = datasets.load_dataset(
+                    extension,
+                    data_files=data_files,
+                    split=f"train[{args.validation_split_percentage}%:]"
+                )
 
-    lm_dataset = tokenized_dataset.map(group_texts, batched=True, num_proc=1)
+        def preprocess_function(examples):
+            return tokenizer([x for x in examples["text"]])
+
+        tokenized_dataset = dataset.map(
+            preprocess_function,
+            batched=True,
+            num_proc=args.preprocessing_num_workers,
+            remove_columns=dataset["train"].column_names,
+        )
+
+        # Main data processing function that will concatenate all texts from our dataset and generate chunks of block_size.
+        def group_texts(examples):
+            # Concatenate all texts.
+            concatenated_examples = {k: sum(examples[k], []) for k in examples.keys()}
+            total_length = len(concatenated_examples[list(examples.keys())[0]])
+            # We drop the small remainder, we could add padding if the model supported it instead of this drop, you can
+            # customize this part to your needs.
+            if total_length >= args.block_size:
+                total_length = (total_length // args.block_size) * args.block_size
+            # Split by chunks of block_size.
+            result = {
+                k: [t[i: i + args.block_size] for i in range(0, total_length, args.block_size)]
+                for k, t in concatenated_examples.items()
+            }
+            result["labels"] = result["input_ids"].copy()
+            return result
+
+        lm_dataset = tokenized_dataset.map(group_texts, batched=True, num_proc=args.preprocessing_num_workers)
+        if args.save_preprocessed_dataset_path is not None:
+            lm_dataset.save_to_disk(args.save_preprocessed_dataset_path)
+
     lm_dataset.set_format("torch")
     if args.max_train_samples is not None:
         max_train_samples = min(len(lm_dataset["train"]), args.max_train_samples)
