@@ -32,6 +32,12 @@ wandb.login()
 def parse_args():
     parser = argparse.ArgumentParser(description="Train a language model.")
     parser.add_argument(
+        "--experiment_config",
+        type=str,
+        default=None,
+        help="Path to experiment config file."
+    )
+    parser.add_argument(
         "--model_name_or_path",
         type=str,
         help="Path to pretrained model or model identifier from huggingface.co/models.",
@@ -170,8 +176,15 @@ def parse_args():
     )
     args = parser.parse_args()
 
+    # If provided, load experiment settings from config file
+    if args.experiment_config is not None:
+        with open(args.experiment_config) as f:
+            config = json.load(f)
+        for k, v in config.items():
+            setattr(args, k, v)
+
     # Sanity checks
-    if args.dataset_name is None and args.train_file is None and args.validation_file is None:
+    if args.dataset_name is None and args.train_file is None and args.validation_file is None and args.preprocessed_dataset_path is None:
         raise ValueError("Need either a dataset name or a training/validation file.")
     else:
         if args.train_file is not None:
