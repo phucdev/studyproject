@@ -3,14 +3,19 @@ import os
 import math
 import json
 import logging
+import random
 
 import torch
+import transformers
 import datasets
 import accelerate
-import wandb
 
 from tqdm.auto import tqdm
+from pathlib import Path
 from torch.utils.data import DataLoader
+from accelerate import Accelerator
+from accelerate.logging import get_logger
+from huggingface_hub import Repository, create_repo
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -20,13 +25,7 @@ from transformers import (
 )
 from custom_lr_scheduler import get_custom_lr_scheduler
 
-logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    level=logging.INFO,
-)
-logger = logging.getLogger(__name__)
-wandb.login()
+logger = get_logger(__name__)
 
 
 def parse_args():
@@ -160,7 +159,11 @@ def parse_args():
         default=None,
         help="The number of processes to use for the preprocessing.",
     )
-    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--push_to_hub", action="store_true", help="Whether or not to push the model to the Hub.")
+    parser.add_argument(
+        "--hub_model_id", type=str, help="The name of the repository to keep in sync with the local `output_dir`."
+    )
+    parser.add_argument("--hub_token", type=str, help="The token to use to push to the Model Hub.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--checkpointing_steps",
@@ -173,6 +176,21 @@ def parse_args():
         type=str,
         default=None,
         help="If the training should continue from a checkpoint folder.",
+    )
+    parser.add_argument(
+        "--with_tracking",
+        action="store_true",
+        help="Whether to enable experiment trackers for logging.",
+    )
+    parser.add_argument(
+        "--report_to",
+        type=str,
+        default="all",
+        help=(
+            'The integration to report the results and logs to. Supported platforms are `"tensorboard"`,'
+            ' `"wandb"`, `"comet_ml"` and `"clearml"`. Use `"all"` (default) to report to all integrations.'
+            "Only applicable when `--with_tracking` is passed."
+        ),
     )
     args = parser.parse_args()
 
@@ -196,18 +214,64 @@ def parse_args():
             if extension not in ["csv", "json", "txt"]:
                 raise ValueError("`validation_file` should be a csv, json or txt file.")
 
+    if args.push_to_hub:
+        if args.output_dir is None:
+            raise ValueError("Need an `output_dir` to create a repo when `--push_to_hub` is passed.")
+
     return args
 
 
 def run_clm(args):
-    wandb.init(
-        project="CLP study project",
-        config=vars(args),
+    # Initialize the accelerator. We will let the accelerator handle device placement for us in this example.
+    # If we're using tracking, we also need to initialize it here and it will by default pick up all supported trackers
+    # in the environment
+    accelerator_log_kwargs = {}
+
+    if args.with_tracking:
+        accelerator_log_kwargs["log_with"] = args.report_to
+        accelerator_log_kwargs["project_dir"] = args.output_dir
+
+    accelerator = Accelerator(gradient_accumulation_steps=args.gradient_accumulation_steps, **accelerator_log_kwargs)
+
+    # Make one log on every process with the configuration for debugging.
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        level=logging.INFO,
     )
+    logger.info(accelerator.state, main_process_only=False)
+    if accelerator.is_local_main_process:
+        datasets.utils.logging.set_verbosity_warning()
+        transformers.utils.logging.set_verbosity_info()
+    else:
+        datasets.utils.logging.set_verbosity_error()
+        transformers.utils.logging.set_verbosity_error()
 
     # Set seed
     if args.seed is not None:
         set_seed(args.seed)
+        logger.info(f"Set seed to {args.seed}")
+
+    # Handle the repository creation
+    if accelerator.is_main_process:
+        if args.push_to_hub:
+            # Retrieve of infer repo_name
+            repo_name = args.hub_model_id
+            if repo_name is None:
+                repo_name = Path(args.output_dir).absolute().name
+            # Create repo and retrieve repo_id
+            repo_id = create_repo(repo_name, exist_ok=True, token=args.hub_token).repo_id
+            # Clone repo locally
+            repo = Repository(args.output_dir, clone_from=repo_id, token=args.hub_token)
+
+            with open(os.path.join(args.output_dir, ".gitignore"), "w+") as gitignore:
+                if "step_*" not in gitignore:
+                    gitignore.write("step_*\n")
+                if "epoch_*" not in gitignore:
+                    gitignore.write("epoch_*\n")
+        elif args.output_dir is not None:
+            os.makedirs(args.output_dir, exist_ok=True)
+    accelerator.wait_for_everyone()
 
     # Create output directory if needed
     if args.output_dir is not None:
@@ -220,6 +284,7 @@ def run_clm(args):
 
     if args.preprocessed_dataset_path is not None:
         lm_dataset = datasets.load_from_disk(args.preprocessed_dataset_path)
+        logger.info(f"Loaded preprocessed dataset from {args.preprocessed_dataset_path}")
     else:
         if args.dataset_name:
             dataset = datasets.load_dataset(
@@ -237,6 +302,7 @@ def run_clm(args):
                     args.dataset_config_name,
                     split=f"train[{args.validation_split_percentage}%:]",
                 )
+            logger.info(f"Loaded dataset {args.dataset_name} with config {args.dataset_config_name}")
         else:
             data_files = {}
             if args.train_file is not None:
@@ -265,16 +331,19 @@ def run_clm(args):
                     data_files=data_files,
                     split=f"train[{args.validation_split_percentage}%:]"
                 )
+            logger.info(f"Loaded dataset from files {data_files}")
 
         def preprocess_function(examples):
             return tokenizer([x for x in examples["text"]])
 
-        tokenized_dataset = dataset.map(
-            preprocess_function,
-            batched=True,
-            num_proc=args.preprocessing_num_workers,
-            remove_columns=dataset["train"].column_names,
-        )
+        with accelerator.main_process_first():
+            tokenized_dataset = dataset.map(
+                preprocess_function,
+                batched=True,
+                num_proc=args.preprocessing_num_workers,
+                remove_columns=dataset["train"].column_names,
+                desc="Running tokenizer on dataset",
+            )
 
         # Main data processing function that will concatenate all texts from our dataset and generate chunks of block_size.
         def group_texts(examples):
@@ -293,19 +362,32 @@ def run_clm(args):
             result["labels"] = result["input_ids"].copy()
             return result
 
-        lm_dataset = tokenized_dataset.map(group_texts, batched=True, num_proc=args.preprocessing_num_workers)
-        if args.save_preprocessed_dataset_path is not None:
-            lm_dataset.save_to_disk(args.save_preprocessed_dataset_path)
+        with accelerator.main_process_first():
+            lm_dataset = tokenized_dataset.map(
+                group_texts,
+                batched=True,
+                num_proc=args.preprocessing_num_workers,
+                desc=f"Grouping texts in chunks of {args.block_size}",
+            )
+            if args.save_preprocessed_dataset_path is not None:
+                lm_dataset.save_to_disk(args.save_preprocessed_dataset_path)
+                logger.info(f"Saved preprocessed dataset to {args.save_preprocessed_dataset_path}")
 
-    lm_dataset.set_format("torch")
-    if args.max_train_samples is not None:
-        max_train_samples = min(len(lm_dataset["train"]), args.max_train_samples)
-        lm_dataset["train"] = lm_dataset["train"].select(range(max_train_samples))
-    if args.max_eval_samples is not None:
-        max_eval_samples = min(len(lm_dataset["validation"]), args.max_eval_samples)
-        lm_dataset["validation"] = lm_dataset["validation"].select(range(max_eval_samples))
+    with accelerator.main_process_first():
+        lm_dataset.set_format("torch")
+        if args.max_train_samples is not None:
+            max_train_samples = min(len(lm_dataset["train"]), args.max_train_samples)
+            lm_dataset["train"] = lm_dataset["train"].select(range(max_train_samples))
+        if args.max_eval_samples is not None:
+            max_eval_samples = min(len(lm_dataset["validation"]), args.max_eval_samples)
+            lm_dataset["validation"] = lm_dataset["validation"].select(range(max_eval_samples))
 
-    tokenizer.pad_token = tokenizer.eos_token
+
+    # Log a few random samples from the training set:
+    for index in random.sample(range(len(lm_dataset["train"])), 3):
+        logger.info(f"Sample {index} of the training set: {lm_dataset['train'][index]}.")
+
+    tokenizer.pad_token = tokenizer.eos_token   # TODO not in run_clm_no_trainer.py, but in run_clm.py with HF Trainer
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
     train_dataloader = DataLoader(
@@ -318,6 +400,7 @@ def run_clm(args):
     # Load pretrained model
     config = AutoConfig.from_pretrained(args.model_name_or_path)
     model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path, config=config)
+    logger.info(f"Loaded model {args.model_name_or_path}")
 
     if args.pure_embedding_training_percentage > 0:
         # freeze transformer layer to only train embeddings, the language modeling head (embed_out) is not affected
@@ -326,8 +409,7 @@ def run_clm(args):
         # unfreeze word embeddings
         model.gpt_neox.embed_in.weight.requires_grad = True
     transformer_layers_are_frozen = True
-
-    model.to(args.device)
+    logger.info(f"Freezing transformer layers for {args.pure_embedding_training_percentage}% of training steps")
 
     # Optimizer
     # Split weights in two groups, one with weight decay and the other not.
@@ -354,41 +436,53 @@ def run_clm(args):
     lr_scheduler = get_custom_lr_scheduler(
         optimizer=optimizer,
         warmup_percentage=args.warmup_percentage,
-        num_training_steps=num_training_steps,
-        num_pure_embedding_training_steps=pure_embedding_training_steps,
+        num_training_steps=num_training_steps,  # TODO run_clm_no_trainer multiplies this with gradient_accumulation_steps
+        pure_embedding_training_percentage=args.pure_embedding_training_percentage,
         min_lr=args.min_lr
     )
+
+    # Prepare everything with our `accelerator`.
+    model, optimizer, train_dataloader, eval_dataloader, lr_scheduler = accelerator.prepare(
+        model, optimizer, train_dataloader, eval_dataloader, lr_scheduler
+    )
+
+    # We need to recalculate our total training steps as the size of the training dataloader may have changed.
+    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+    num_training_steps = args.num_train_epochs * num_update_steps_per_epoch
+    # Afterwards we recalculate our number of training epochs
+    args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
     checkpointing_steps = args.checkpointing_steps
     if checkpointing_steps is not None and checkpointing_steps.isdigit():
         checkpointing_steps = int(checkpointing_steps)
 
     # Training
-    total_batch_size = args.per_device_train_batch_size * args.gradient_accumulation_steps
+    total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
     logger.info("***** Running training *****")
     logger.info(f"  Num examples = {len(lm_dataset['train'])}")
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
     logger.info(f"  Instantaneous batch size per device = {args.per_device_train_batch_size}")
-    logger.info(f"  Total train batch size (w. accumulation) = {total_batch_size}")
+    logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {num_training_steps}")
 
-    progress_bar = tqdm(range(num_training_steps))
+    progress_bar = tqdm(range(num_training_steps), disable=not accelerator.is_local_main_process)
     completed_steps = 0
+    starting_epoch = 0
 
     # Potentially load in the weights and states from a previous save
     if args.resume_from_checkpoint is not None:
         logger.info(f"Resumed from checkpoint: {args.resume_from_checkpoint}")
-        checkpoint = torch.load(args.resume_from_checkpoint)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        epoch = checkpoint['epoch']
-        loss = checkpoint['loss']
+        checkpoint_path = args.resume_from_checkpoint
+        path = os.path.basename(args.resume_from_checkpoint)
+
+        accelerator.print(f"Resumed from checkpoint: {checkpoint_path}")
+        accelerator.load_state(path)
         # Extract `epoch_{i}` or `step_{i}`
-        training_difference = os.path.splitext(os.path.basename(args.resume_from_checkpoint))[0]
+        training_difference = os.path.splitext(path)[0]
 
         if "epoch" in training_difference:
-            starting_epoch = epoch + 1
+            starting_epoch = int(training_difference.replace("epoch_", "")) + 1
             resume_step = None
             completed_steps = starting_epoch * num_update_steps_per_epoch
         else:
@@ -406,7 +500,7 @@ def run_clm(args):
         total_loss = 0
         if args.resume_from_checkpoint and epoch == starting_epoch and resume_step is not None:
             # We skip the first `n` batches in the dataloader when resuming from a checkpoint
-            active_dataloader = accelerate.data_loader.skip_first_batches(train_dataloader, resume_step)
+            active_dataloader = accelerator.skip_first_batches(train_dataloader, resume_step)
         else:
             active_dataloader = train_dataloader
         for step, batch in enumerate(active_dataloader):
@@ -419,53 +513,38 @@ def run_clm(args):
                 lr_scheduler.min_lr = 0.0   # TODO check if we want to decay to 0 for the full training
                 transformer_layers_are_frozen = False
                 logger.info(f"epoch {epoch}: step {completed_steps}: unfreezing transformer layers")
-
-            batch = {k: v.to(model.device) for k, v in batch.items()}
-            outputs = model(**batch)
-            loss = outputs.loss
-            # loss = loss_function(outputs, targets)
-            loss = loss / args.gradient_accumulation_steps
-            perplexity = math.exp(loss)
-            # We keep track of the loss at each epoch
-            total_loss += loss.detach().float()
-            loss.backward()
-            if ((step + 1) % args.gradient_accumulation_steps == 0) or (step + 1 == len(train_dataloader)):
-                wandb.log({
-                    "train/train_loss": loss,
-                    "train/perplexity": perplexity,
-                })
-                before_lr = optimizer.param_groups[0]["lr"]
+            with accelerator.accumulate(model):
+                outputs = model(**batch)
+                loss = outputs.loss
+                # We keep track of the loss at each epoch
+                total_loss += loss.detach().float()
+                accelerator.backward(loss)
                 optimizer.step()
                 lr_scheduler.step()
-                after_lr = optimizer.param_groups[0]["lr"]
                 optimizer.zero_grad()
+
+            # Checks if the accelerator has performed an optimization step behind the scenes
+            if accelerator.sync_gradients:
                 progress_bar.update(1)
                 completed_steps += 1
-                logger.info(f"epoch {epoch}: step {completed_steps}: lr {before_lr} -> {after_lr} loss {loss}")
 
             if isinstance(checkpointing_steps, int):
                 if completed_steps % checkpointing_steps == 0:
-                    output_file = f"step_{completed_steps}.pt"
+                    output_dir = f"step_{completed_steps}"
                     if args.output_dir is not None:
-                        output_file = os.path.join(args.output_dir, output_file)
-                    torch.save({
-                        'epoch': epoch,
-                        'model_state_dict': model.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(),
-                        'loss': loss,
-                    }, output_file)
+                        output_dir = os.path.join(args.output_dir, output_dir)
+                    accelerator.save_state(output_dir)
 
         model.eval()
         losses = []
         for step, batch in enumerate(eval_dataloader):
             with torch.no_grad():
-                batch = {k: v.to(model.device) for k, v in batch.items()}
                 outputs = model(**batch)
 
             loss = outputs.loss
-            losses.append(loss)
+            losses.append(accelerator.gather_for_metrics(loss.repeat(args.per_device_eval_batch_size)))
 
-        losses = torch.stack(losses)
+        losses = torch.cat(losses)
         try:
             eval_loss = torch.mean(losses)
             perplexity = math.exp(eval_loss)
@@ -473,27 +552,53 @@ def run_clm(args):
             perplexity = float("inf")
 
         logger.info(f"epoch {epoch}: perplexity: {perplexity} eval_loss: {eval_loss}")
-        wandb.log({
-            "eval/eval_loss": eval_loss,
-            "eval/perplexity": perplexity,
-        })
+
+        if args.with_tracking:
+            accelerator.log(
+                {
+                    "perplexity": perplexity,
+                    "eval_loss": eval_loss,
+                    "train_loss": total_loss.item() / len(train_dataloader),
+                    "epoch": epoch,
+                    "step": completed_steps,
+                },
+                step=completed_steps,
+            )
+
+        if args.push_to_hub and epoch < args.num_train_epochs - 1:
+            accelerator.wait_for_everyone()
+            unwrapped_model = accelerator.unwrap_model(model)
+            unwrapped_model.save_pretrained(
+                args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
+            )
+            if accelerator.is_main_process:
+                tokenizer.save_pretrained(args.output_dir)
+                repo.push_to_hub(
+                    commit_message=f"Training in progress epoch {epoch}", blocking=False, auto_lfs_prune=True
+                )
 
         if args.checkpointing_steps == "epoch":
-            output_file = f"epoch_{epoch}.pt"
+            output_dir = f"epoch_{epoch}"
             if args.output_dir is not None:
-                output_file = os.path.join(args.output_dir, output_file)
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': loss,
-            }, output_file)
+                output_dir = os.path.join(args.output_dir, output_dir)
+            accelerator.save_state(output_dir)
 
-    model.save_pretrained(args.output_dir)
-    with open(os.path.join(args.output_dir, "all_results.json"), "w") as f:
-        json.dump({"perplexity": perplexity}, f)
+    if args.with_tracking:
+        accelerator.end_training()
 
-    wandb.finish()
+    if args.output_dir is not None:
+        accelerator.wait_for_everyone()
+        unwrapped_model = accelerator.unwrap_model(model)
+        unwrapped_model.save_pretrained(
+            args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
+        )
+        if accelerator.is_main_process:
+            tokenizer.save_pretrained(args.output_dir)
+            if args.push_to_hub:
+                repo.push_to_hub(commit_message="End of training", auto_lfs_prune=True)
+
+            with open(os.path.join(args.output_dir, "all_results.json"), "w") as f:
+                json.dump({"perplexity": perplexity}, f)
 
 
 def main():
