@@ -3,6 +3,7 @@ import os
 import math
 import json
 import logging
+import random
 
 import torch
 import datasets
@@ -220,6 +221,7 @@ def run_clm(args):
 
     if args.preprocessed_dataset_path is not None:
         lm_dataset = datasets.load_from_disk(args.preprocessed_dataset_path)
+        logger.info(f"Loaded preprocessed dataset from {args.preprocessed_dataset_path}")
     else:
         if args.dataset_name:
             dataset = datasets.load_dataset(
@@ -237,6 +239,7 @@ def run_clm(args):
                     args.dataset_config_name,
                     split=f"train[{args.validation_split_percentage}%:]",
                 )
+            logger.info(f"Loaded dataset {args.dataset_name} with config {args.dataset_config_name}")
         else:
             data_files = {}
             if args.train_file is not None:
@@ -305,7 +308,12 @@ def run_clm(args):
         max_eval_samples = min(len(lm_dataset["validation"]), args.max_eval_samples)
         lm_dataset["validation"] = lm_dataset["validation"].select(range(max_eval_samples))
 
-    tokenizer.pad_token = tokenizer.eos_token
+
+    # Log a few random samples from the training set:
+    for index in random.sample(range(len(lm_dataset["train"])), 3):
+        logger.info(f"Sample {index} of the training set: {lm_dataset['train'][index]}.")
+
+    tokenizer.pad_token = tokenizer.eos_token   # TODO not in run_clm_no_trainer.py, but in run_clm.py with HF Trainer
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
     train_dataloader = DataLoader(
@@ -318,6 +326,7 @@ def run_clm(args):
     # Load pretrained model
     config = AutoConfig.from_pretrained(args.model_name_or_path)
     model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path, config=config)
+    logger.info(f"Loaded model {args.model_name_or_path}")
 
     if args.pure_embedding_training_percentage > 0:
         # freeze transformer layer to only train embeddings, the language modeling head (embed_out) is not affected
@@ -355,7 +364,7 @@ def run_clm(args):
         optimizer=optimizer,
         warmup_percentage=args.warmup_percentage,
         num_training_steps=num_training_steps,
-        num_pure_embedding_training_steps=pure_embedding_training_steps,
+        pure_embedding_training_percentage=args.pure_embedding_training_percentage,
         min_lr=args.min_lr
     )
 
@@ -375,6 +384,7 @@ def run_clm(args):
 
     progress_bar = tqdm(range(num_training_steps))
     completed_steps = 0
+    starting_epoch = 0
 
     # Potentially load in the weights and states from a previous save
     if args.resume_from_checkpoint is not None:

@@ -110,8 +110,9 @@ class CustomLambdaLR(LRScheduler):
 
 def _get_cosine_schedule_with_warmup_lr_lambda(
         current_step: int, *, warmup_percentage: int, num_training_steps: int, num_cycles: float,
-        num_pure_embedding_training_steps: int
+        pure_embedding_training_percentage: int
 ):
+    num_pure_embedding_training_steps = math.ceil(num_training_steps*pure_embedding_training_percentage/100)
     warmup_embedding_steps = math.ceil(num_pure_embedding_training_steps*warmup_percentage/100)
     warmup_and_embedding_training_steps = warmup_embedding_steps + num_pure_embedding_training_steps
 
@@ -141,13 +142,13 @@ def _get_cosine_schedule_with_warmup_lr_lambda(
     return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress * float(num_cycles) * 2.0)))
 
 
-def get_custom_lr_scheduler(optimizer, warmup_percentage, num_training_steps, num_pure_embedding_training_steps,
+def get_custom_lr_scheduler(optimizer, warmup_percentage, num_training_steps, pure_embedding_training_percentage,
                             num_cycles: float = 0.5, min_lr: float = 0.0):
     lr_lambda = partial(
         _get_cosine_schedule_with_warmup_lr_lambda,
         warmup_percentage=warmup_percentage,
         num_training_steps=num_training_steps,
-        num_pure_embedding_training_steps=num_pure_embedding_training_steps,
+        pure_embedding_training_percentage=pure_embedding_training_percentage,
         num_cycles=num_cycles
     )
 
