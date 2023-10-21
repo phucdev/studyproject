@@ -444,15 +444,13 @@ def run_clm(args):
                 wandb.log({
                     "train/train_loss": loss,
                     "train/perplexity": perplexity,
+                    "train/lr": optimizer.param_groups[0]["lr"],
                 })
-                before_lr = optimizer.param_groups[0]["lr"]
                 optimizer.step()
                 lr_scheduler.step()
-                after_lr = optimizer.param_groups[0]["lr"]
                 optimizer.zero_grad()
                 progress_bar.update(1)
                 completed_steps += 1
-                logger.info(f"epoch {epoch}: step {completed_steps}: lr {before_lr} -> {after_lr} loss {loss}")
 
             if isinstance(checkpointing_steps, int):
                 if completed_steps % checkpointing_steps == 0:
