@@ -394,6 +394,7 @@ def run_clm(args):
         checkpoint = torch.load(args.resume_from_checkpoint)
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        lr_scheduler.load_state_dict(checkpoint['lr_scheduler_state_dict'])
         epoch = checkpoint['epoch']
         loss = checkpoint['loss']
         # Extract `epoch_{i}` or `step_{i}`
@@ -461,6 +462,7 @@ def run_clm(args):
                         'epoch': epoch,
                         'model_state_dict': model.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict(),
+                        'lr_scheduler_state_dict': lr_scheduler.state_dict(),
                         'loss': loss,
                     }, output_file)
 
@@ -495,6 +497,7 @@ def run_clm(args):
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
+                'lr_scheduler_state_dict': lr_scheduler.state_dict(),
                 'loss': loss,
             }, output_file)
 
