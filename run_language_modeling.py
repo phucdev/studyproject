@@ -454,7 +454,7 @@ def run_clm(args):
                 completed_steps += 1
 
             if isinstance(checkpointing_steps, int):
-                if completed_steps % checkpointing_steps == 0:
+                if completed_steps % checkpointing_steps == 0 and completed_steps > 0:
                     output_file = f"step_{completed_steps}.pt"
                     if args.output_dir is not None:
                         output_file = os.path.join(args.output_dir, output_file)
