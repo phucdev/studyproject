@@ -108,7 +108,7 @@ class CustomLambdaLR(LRScheduler):
         return lrs
 
 
-def _get_cosine_schedule_with_warmup_lr_lambda(
+def _get_cosine_schedule_with_warmup_embedding_tuning_lr_lambda(
         current_step: int, *, warmup_percentage: int, num_training_steps: int, num_cycles: float,
         pure_embedding_training_percentage: int
 ):
@@ -142,14 +142,31 @@ def _get_cosine_schedule_with_warmup_lr_lambda(
     return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress * float(num_cycles) * 2.0)))
 
 
+def _get_cosine_schedule_with_warmup_lr_lambda(
+        current_step: int, *, warmup_percentage: int, num_training_steps: int, num_cycles: float):
+    warmup_steps = math.ceil(num_training_steps*warmup_percentage/100)
+    if current_step < warmup_steps:
+        return float(current_step) / float(max(1, warmup_steps))
+    progress = float(current_step - warmup_steps) / float(max(1, num_training_steps - warmup_steps))
+    return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress * float(num_cycles) * 2.0)))
+
+
 def get_custom_lr_scheduler(optimizer, warmup_percentage, num_training_steps, pure_embedding_training_percentage,
                             num_cycles: float = 0.5, min_lr: float = 0.0):
-    lr_lambda = partial(
-        _get_cosine_schedule_with_warmup_lr_lambda,
-        warmup_percentage=warmup_percentage,
-        num_training_steps=num_training_steps,
-        pure_embedding_training_percentage=pure_embedding_training_percentage,
-        num_cycles=num_cycles
-    )
+    if pure_embedding_training_percentage > 0:
+        lr_lambda = partial(
+            _get_cosine_schedule_with_warmup_embedding_tuning_lr_lambda,
+            warmup_percentage=warmup_percentage,
+            num_training_steps=num_training_steps,
+            pure_embedding_training_percentage=pure_embedding_training_percentage,
+            num_cycles=num_cycles
+        )
+    else:
+        lr_lambda = partial(
+            _get_cosine_schedule_with_warmup_lr_lambda,
+            warmup_percentage=warmup_percentage,
+            num_training_steps=num_training_steps,
+            num_cycles=num_cycles
+        )
 
     return CustomLambdaLR(optimizer, lr_lambda, min_lr=min_lr)

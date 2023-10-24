@@ -128,7 +128,7 @@ def parse_args():
     parser.add_argument(
         "--pure_embedding_training_percentage",
         type=int,
-        default=10,
+        default=0,
         help="Percentage of training steps to train only the embedding layer."
     )
     parser.add_argument(
@@ -408,8 +408,10 @@ def run_clm(args):
             param.requires_grad = False
         # unfreeze word embeddings
         model.gpt_neox.embed_in.weight.requires_grad = True
-    transformer_layers_are_frozen = True
-    logger.info(f"Freezing transformer layers for {args.pure_embedding_training_percentage}% of training steps")
+        transformer_layers_are_frozen = True
+        logger.info(f"Freezing transformer layers for {args.pure_embedding_training_percentage}% of training steps")
+    else:
+        transformer_layers_are_frozen = False
 
     # Optimizer
     # Split weights in two groups, one with weight decay and the other not.
@@ -510,7 +512,6 @@ def run_clm(args):
                     param.requires_grad = True
                 # set new learning rate for full training and decay to 0.0 for the full training
                 lr_scheduler.base_lrs = [args.full_training_learning_rate for _ in lr_scheduler.base_lrs]
-                lr_scheduler.min_lr = 0.0   # TODO check if we want to decay to 0 for the full training
                 transformer_layers_are_frozen = False
                 logger.info(f"epoch {epoch}: step {completed_steps}: unfreezing transformer layers")
             with accelerator.accumulate(model):
@@ -537,12 +538,15 @@ def run_clm(args):
 
         model.eval()
         losses = []
+        num_eval_steps = len(eval_dataloader)
+        eval_progress_bar = tqdm(range(num_eval_steps))
         for step, batch in enumerate(eval_dataloader):
             with torch.no_grad():
                 outputs = model(**batch)
 
             loss = outputs.loss
             losses.append(accelerator.gather_for_metrics(loss.repeat(args.per_device_eval_batch_size)))
+            eval_progress_bar.update(1)
 
         losses = torch.cat(losses)
         try:

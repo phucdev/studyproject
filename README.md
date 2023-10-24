@@ -24,7 +24,7 @@ We aim to improve upon the CLP-Transfer method through several modifications.
 We follow the methodology from Minixhofer et al. (2021) and Ostendorff & Rehm (2023) to construct a separate training and validation dataset from the German subset of OSCAR v2019 (Ortiz Su'arez et al., 2019). They use the first 4GB of OSCAR as the training dataset and the next 0.4GB as the validation set. The training dataset contains approximately 30.8B tokens. To reproduce the pretraining dataset for the German model:
 
 ````bash
-python prepare.py \
+python prepare_oscar.py \
 	--dataset_name=oscar \
 	--dataset_config_name=unshuffled_deduplicated_de \
 	--output_dir=data/oscar_de \
@@ -46,13 +46,21 @@ python clp.py apply_clp \
 
 ### Pretraining
 
-
+To train a model on the causal language modeling objective, run:
 
 ```bash
-TODO
+python run_language_modeling.py --experiment_config=configs/clp_baseline.json
 ```
 
+If you want to train a model on the causal language modeling objective, but with a pure embedding training phase, where we 
+first freeze the transformer layers and train the word embeddings with a high learning rate for a percentage of the 
+number of training steps and then train the full model with a lower learning rate, then run:
 
+```bash
+python run_language_modeling.py --experiment_config=configs/clp_embedding_tuning.json
+```
+
+You can pass arguments directly via the CLI or by specifying a JSON file with the arguments.
 
 ### Evaluation
 
