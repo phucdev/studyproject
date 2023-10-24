@@ -422,6 +422,7 @@ def run_clm(args):
             active_dataloader = accelerate.data_loader.skip_first_batches(train_dataloader, resume_step)
         else:
             active_dataloader = train_dataloader
+        accumulated_loss = 0
         for step, batch in enumerate(active_dataloader):
             if transformer_layers_are_frozen and completed_steps >= warmup_and_embedding_training_steps:
                 # unfreeze transformer layers
@@ -437,16 +438,18 @@ def run_clm(args):
             loss = outputs.loss
             # loss = loss_function(outputs, targets)
             loss = loss / args.gradient_accumulation_steps
-            perplexity = math.exp(loss)
+            accumulated_loss += loss.detach().float()
             # We keep track of the loss at each epoch
             total_loss += loss.detach().float()
             loss.backward()
             if ((step + 1) % args.gradient_accumulation_steps == 0) or (step + 1 == len(train_dataloader)):
+                perplexity = math.exp(accumulated_loss)
                 wandb.log({
-                    "train/train_loss": loss,
+                    "train/train_loss": accumulated_loss,
                     "train/perplexity": perplexity,
                     "train/lr": optimizer.param_groups[0]["lr"],
                 })
+                accumulated_loss = 0
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
@@ -468,6 +471,8 @@ def run_clm(args):
 
         model.eval()
         losses = []
+        num_eval_steps = len(eval_dataloader)
+        eval_progress_bar = tqdm(range(num_eval_steps))
         for step, batch in enumerate(eval_dataloader):
             with torch.no_grad():
                 batch = {k: v.to(model.device) for k, v in batch.items()}
@@ -475,6 +480,7 @@ def run_clm(args):
 
             loss = outputs.loss
             losses.append(loss)
+            eval_progress_bar.update(1)
 
         losses = torch.stack(losses)
         try:
@@ -502,6 +508,7 @@ def run_clm(args):
             }, output_file)
 
     model.save_pretrained(args.output_dir)
+    tokenizer.save_pretrained(args.output_dir)
     with open(os.path.join(args.output_dir, "all_results.json"), "w") as f:
         json.dump({"perplexity": perplexity}, f)
 
