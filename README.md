@@ -61,6 +61,18 @@ python run_language_modeling.py --experiment_config=configs/clp_embedding_tuning
 ```
 
 You can pass arguments directly via the CLI or by specifying a JSON file with the arguments.
+If you want to track the experiment, set the `--with_tracking` flag and set the `--report_to` parameter
+to the platform of your choice.
+
+In order to train in a distributed setup with `accelerate`, create a config with
+```bash
+accelerate config
+```
+Then you can launch the script with `accelerate launch`. A complete example would be:
+```bash
+accelerate launch run_language_modeling.py --experiment_config=configs/clp_embedding_tuning.json --with_tracking --report_to=wandb
+```
+
 
 ### Evaluation
 
