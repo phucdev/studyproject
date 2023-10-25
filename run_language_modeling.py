@@ -515,8 +515,12 @@ def run_clm(args):
         for step, batch in enumerate(active_dataloader):
             if transformer_layers_are_frozen and completed_steps >= warmup_and_embedding_training_steps:
                 # unfreeze transformer layers
-                for param in model.gpt_neox.parameters():
-                    param.requires_grad = True
+                if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+                    for param in model.module.gpt_neox.parameters():
+                        param.requires_grad = True
+                else:
+                    for param in model.gpt_neox.parameters():
+                        param.requires_grad = True
                 # set new learning rate for full training and decay to 0.0 for the full training
                 lr_scheduler.base_lrs = [args.full_training_learning_rate for _ in lr_scheduler.base_lrs]
                 transformer_layers_are_frozen = False
@@ -524,8 +528,10 @@ def run_clm(args):
             with accelerator.accumulate(model):
                 outputs = model(**batch)
                 loss = outputs.loss
+                train_step_loss = loss.detach().float()
+                train_step_perplexity = math.exp(train_step_loss)
                 # We keep track of the loss at each epoch
-                total_loss += loss.detach().float()
+                total_loss += train_step_loss
                 accelerator.backward(loss)
                 optimizer.step()
                 lr_scheduler.step()
@@ -535,6 +541,14 @@ def run_clm(args):
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 completed_steps += 1
+                if args.with_tracking:
+                    # Logs the last loss & perplexity per accumulated step when the gradients are synchronized.
+                    # TODO is this really desirable?
+                    accelerator.log({
+                        "train/loss": train_step_loss,
+                        "train/perplexity": train_step_perplexity,
+                        "train/lr": optimizer.param_groups[0]["lr"],
+                    }, step=step)
 
             if isinstance(checkpointing_steps, int):
                 if completed_steps > 0 and completed_steps % checkpointing_steps == 0:
@@ -567,9 +581,9 @@ def run_clm(args):
         if args.with_tracking:
             accelerator.log(
                 {
-                    "perplexity": perplexity,
-                    "eval_loss": eval_loss,
-                    "train_loss": total_loss.item() / len(train_dataloader),
+                    "eval/perplexity": perplexity,
+                    "eval/loss": eval_loss,
+                    "train/epoch_loss": total_loss.item() / len(train_dataloader),
                     "epoch": epoch,
                     "step": completed_steps,
                 },
