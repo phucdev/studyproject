@@ -462,7 +462,7 @@ def run_clm(args):
     if args.with_tracking:
         experiment_config = vars(args)
         # TensorBoard cannot log Enums, need the raw value
-        experiment_config["lr_scheduler_type"] = experiment_config["lr_scheduler_type"].value
+        experiment_config["lr_scheduler_type"] = "2 phase custom LR scheduler with warmup, cosine decay"
         accelerator.init_trackers("CLP study project", experiment_config)
 
     # Training
@@ -537,7 +537,7 @@ def run_clm(args):
                 completed_steps += 1
 
             if isinstance(checkpointing_steps, int):
-                if completed_steps % checkpointing_steps == 0:
+                if completed_steps > 0 and completed_steps % checkpointing_steps == 0:
                     output_dir = f"step_{completed_steps}"
                     if args.output_dir is not None:
                         output_dir = os.path.join(args.output_dir, output_dir)
