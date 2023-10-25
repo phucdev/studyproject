@@ -8,7 +8,6 @@ import random
 import torch
 import transformers
 import datasets
-import accelerate
 
 from tqdm.auto import tqdm
 from pathlib import Path
@@ -452,11 +451,19 @@ def run_clm(args):
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
     num_training_steps = args.num_train_epochs * num_update_steps_per_epoch
     # Afterwards we recalculate our number of training epochs
-    args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
+    args.num_train_epochs = math.ceil(num_training_steps / num_update_steps_per_epoch)
 
     checkpointing_steps = args.checkpointing_steps
     if checkpointing_steps is not None and checkpointing_steps.isdigit():
         checkpointing_steps = int(checkpointing_steps)
+
+    # We need to initialize the trackers we use, and also store our configuration.
+    # The trackers initializes automatically on the main process.
+    if args.with_tracking:
+        experiment_config = vars(args)
+        # TensorBoard cannot log Enums, need the raw value
+        experiment_config["lr_scheduler_type"] = experiment_config["lr_scheduler_type"].value
+        accelerator.init_trackers("CLP study project", experiment_config)
 
     # Training
     total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
