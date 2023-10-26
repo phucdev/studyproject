@@ -14,6 +14,7 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 from accelerate import Accelerator
 from accelerate.logging import get_logger
+from accelerate.scheduler import AcceleratedScheduler
 from huggingface_hub import Repository, create_repo
 from transformers import (
     AutoModelForCausalLM,
@@ -507,6 +508,7 @@ def run_clm(args):
     for epoch in range(args.num_train_epochs):
         model.train()
         total_loss = 0
+        batch_loss = 0
         if args.resume_from_checkpoint and epoch == starting_epoch and resume_step is not None:
             # We skip the first `n` batches in the dataloader when resuming from a checkpoint
             active_dataloader = accelerator.skip_first_batches(train_dataloader, resume_step)
@@ -521,15 +523,19 @@ def run_clm(args):
                 else:
                     for param in model.gpt_neox.parameters():
                         param.requires_grad = True
-                # set new learning rate for full training and decay to 0.0 for the full training
-                lr_scheduler.base_lrs = [args.full_training_learning_rate for _ in lr_scheduler.base_lrs]
+                # set new peak learning rate for full training
+                if isinstance(lr_scheduler, AcceleratedScheduler):
+                    lr_scheduler.scheduler.base_lrs = [args.full_training_learning_rate for _ in
+                                                       lr_scheduler.scheduler.base_lrs]
+                else:
+                    lr_scheduler.base_lrs = [args.full_training_learning_rate for _ in lr_scheduler.base_lrs]
                 transformer_layers_are_frozen = False
                 logger.info(f"epoch {epoch}: step {completed_steps}: unfreezing transformer layers")
             with accelerator.accumulate(model):
                 outputs = model(**batch)
                 loss = outputs.loss
                 train_step_loss = loss.detach().float()
-                train_step_perplexity = math.exp(train_step_loss)
+                batch_loss += train_step_loss
                 # We keep track of the loss at each epoch
                 total_loss += train_step_loss
                 accelerator.backward(loss)
@@ -542,13 +548,15 @@ def run_clm(args):
                 progress_bar.update(1)
                 completed_steps += 1
                 if args.with_tracking:
-                    # Logs the last loss & perplexity per accumulated step when the gradients are synchronized.
-                    # TODO is this really desirable?
+                    # TODO check if this makes sense. We average the loss of a batch (w. parallel, distributed & accumulation) for reporting
+                    train_loss = batch_loss/total_batch_size
+                    train_perplexity = math.exp(train_loss)
                     accelerator.log({
-                        "train/loss": train_step_loss,
-                        "train/perplexity": train_step_perplexity,
+                        "train/loss": train_loss,  
+                        "train/perplexity": train_perplexity,
                         "train/lr": optimizer.param_groups[0]["lr"],
                     }, step=step)
+                    batch_loss = 0
 
             if isinstance(checkpointing_steps, int):
                 if completed_steps > 0 and completed_steps % checkpointing_steps == 0:
