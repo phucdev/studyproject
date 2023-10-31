@@ -121,6 +121,9 @@ def parse_args():
         help="Initial learning rate (after the potential warmup period) to use for the full training.",)
     parser.add_argument("--min_lr", type=float, default=0.0, help="Minimum learning rate during training.")
     parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay to use.")
+    parser.add_argument("--beta1", type=float, default=0.9, help="Adam beta1.")
+    parser.add_argument("--beta2", type=float, default=0.95, help="Adam beta2.")
+    parser.add_argument("--grad_clip", type=float, default=1.0, help="Gradient clipping.")
     parser.add_argument(
         "--gradient_accumulation_steps",
         type=int,
@@ -170,6 +173,12 @@ def parse_args():
         help="Whether the various states should be saved at the end of every n steps, or 'epoch' for each epoch."
     )
     parser.add_argument(
+        "--eval_steps",
+        type=str,
+        default=None,
+        help="Whether to evaluate the model at the end of every n steps, or 'epoch' for each epoch."
+    )
+    parser.add_argument(
         "--resume_from_checkpoint",
         type=str,
         default=None,
@@ -199,6 +208,45 @@ def parse_args():
 
     return args
 
+
+def save_checkpoint(output_dir, model, optimizer, lr_scheduler, epoch, loss, completed_steps=None):
+    if completed_steps is not None:
+        output_file = f"step_{completed_steps}.pt"
+    else:
+        output_file = f"epoch_{epoch}.pt"
+    if output_dir is not None:
+        output_file = os.path.join(output_dir, output_file)
+    torch.save({
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'lr_scheduler_state_dict': lr_scheduler.state_dict(),
+        'loss': loss,
+    }, output_file)
+
+
+def validate_model(model, eval_dataloader, device):
+    model.eval()
+    losses = []
+    num_eval_steps = len(eval_dataloader)
+    eval_progress_bar = tqdm(range(num_eval_steps), position=0, leave=True)
+    for step, batch in enumerate(eval_dataloader):
+        with torch.no_grad():
+            batch = {k: v.to(device) for k, v in batch.items()}
+            outputs = model(**batch)
+
+        loss = outputs.loss
+        losses.append(loss)
+        eval_progress_bar.update(1)
+
+    losses = torch.stack(losses)
+    try:
+        eval_loss = torch.mean(losses)
+        perplexity = math.exp(eval_loss)
+    except OverflowError:
+        perplexity = float("inf")
+
+    return eval_loss, perplexity
 
 def run_clm(args):
     wandb.init(
@@ -353,7 +401,7 @@ def run_clm(args):
             "weight_decay": 0.0,
         },
     ]
-    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate)
+    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate, betas=(args.beta1, args.beta2))
 
     # LR Scheduler
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -374,6 +422,10 @@ def run_clm(args):
     if checkpointing_steps is not None and checkpointing_steps.isdigit():
         checkpointing_steps = int(checkpointing_steps)
 
+    eval_steps = args.eval_steps
+    if eval_steps is not None and eval_steps.isdigit():
+        eval_steps = int(eval_steps)
+
     # Training
     total_batch_size = args.per_device_train_batch_size * args.gradient_accumulation_steps
     logger.info("***** Running training *****")
@@ -384,7 +436,7 @@ def run_clm(args):
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {num_training_steps}")
 
-    progress_bar = tqdm(range(num_training_steps))
+    progress_bar = tqdm(range(num_training_steps), position=0, leave=True)
     completed_steps = 0
     starting_epoch = 0
 
@@ -450,62 +502,42 @@ def run_clm(args):
                     "train/lr": optimizer.param_groups[0]["lr"],
                 })
                 accumulated_loss = 0
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
                 progress_bar.update(1)
                 completed_steps += 1
 
-            if isinstance(checkpointing_steps, int):
-                if completed_steps % checkpointing_steps == 0 and completed_steps > 0:
-                    output_file = f"step_{completed_steps}.pt"
-                    if args.output_dir is not None:
-                        output_file = os.path.join(args.output_dir, output_file)
-                    torch.save({
-                        'epoch': epoch,
-                        'model_state_dict': model.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(),
-                        'lr_scheduler_state_dict': lr_scheduler.state_dict(),
-                        'loss': loss,
-                    }, output_file)
+                if isinstance(eval_steps, int):
+                    if completed_steps % eval_steps == 0 and completed_steps > 0:
+                        logger.info(f"epoch {epoch}: step {completed_steps}: evaluating model")
+                        eval_loss, perplexity = validate_model(model, eval_dataloader, model.device)
+                        logger.info(f"epoch {epoch}: step {completed_steps}: perplexity: {perplexity} eval_loss: {eval_loss}")
+                        wandb.log({
+                            "val/eval_loss": eval_loss,
+                            "val/perplexity": perplexity,
+                        })
+                        model.train()
 
-        model.eval()
-        losses = []
-        num_eval_steps = len(eval_dataloader)
-        eval_progress_bar = tqdm(range(num_eval_steps))
-        for step, batch in enumerate(eval_dataloader):
-            with torch.no_grad():
-                batch = {k: v.to(model.device) for k, v in batch.items()}
-                outputs = model(**batch)
+                if isinstance(checkpointing_steps, int):
+                    if completed_steps % checkpointing_steps == 0 and completed_steps > 0:
+                        logger.info(f"epoch {epoch}: step {completed_steps}: saving checkpoint")
+                        save_checkpoint(
+                            args.output_dir, model, optimizer, lr_scheduler, epoch, loss, completed_steps=completed_steps
+                        )
 
-            loss = outputs.loss
-            losses.append(loss)
-            eval_progress_bar.update(1)
-
-        losses = torch.stack(losses)
-        try:
-            eval_loss = torch.mean(losses)
-            perplexity = math.exp(eval_loss)
-        except OverflowError:
-            perplexity = float("inf")
-
+        logger.info(f"epoch {epoch}: step {completed_steps}: evaluating model")
+        eval_loss, perplexity = validate_model(model, eval_dataloader, model.device)
         logger.info(f"epoch {epoch}: perplexity: {perplexity} eval_loss: {eval_loss}")
         wandb.log({
-            "eval/eval_loss": eval_loss,
-            "eval/perplexity": perplexity,
+            "val/eval_loss": eval_loss,
+            "val/perplexity": perplexity,
         })
 
         if args.checkpointing_steps == "epoch":
-            output_file = f"epoch_{epoch}.pt"
-            if args.output_dir is not None:
-                output_file = os.path.join(args.output_dir, output_file)
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'lr_scheduler_state_dict': lr_scheduler.state_dict(),
-                'loss': loss,
-            }, output_file)
+            logger.info(f"epoch {epoch}: step {completed_steps}: saving checkpoint")
+            save_checkpoint(args.output_dir, model, optimizer, lr_scheduler, epoch, loss)
 
     model.save_pretrained(args.output_dir)
     tokenizer.save_pretrained(args.output_dir)
