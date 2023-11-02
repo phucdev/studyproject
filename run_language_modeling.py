@@ -703,6 +703,8 @@ def run_clm(args):
 
             with open(os.path.join(args.output_dir, "all_results.json"), "w") as f:
                 json.dump({"perplexity": perplexity}, f)
+            with open(os.path.join(args.output_dir, "training_args.json"), "w") as f:
+                json.dump(vars(args), f)
 
 
 def main():
