@@ -181,6 +181,12 @@ def parse_args():
         help="Whether to evaluate the model at the end of every n steps, or 'epoch' for each epoch."
     )
     parser.add_argument(
+        "--eval_iters",
+        type=int,
+        default=None,
+        help="Number of evaluation iterations."
+    )
+    parser.add_argument(
         "--resume_from_checkpoint",
         type=str,
         default=None,
@@ -203,7 +209,8 @@ def parse_args():
     )
     args = parser.parse_args()
 
-    # If provided, load experiment settings from config file
+    # If provided, load experiment settings from config file.
+    # Be aware that the parameters in the config overwrite the default and CLI parameters.
     if args.experiment_config is not None:
         with open(args.experiment_config) as f:
             config = json.load(f)
@@ -230,12 +237,28 @@ def parse_args():
     return args
 
 
-def validate_model(model, eval_dataloader, accelerator, per_device_eval_batch_size):
+def validate_model(model, eval_dataloader, accelerator, per_device_eval_batch_size, eval_iters=None):
+    """Evaluates the model on eval_dataloader and returns the evaluation loss and perplexity.
+    Args:
+        model (:obj:`torch.nn.Module`): The model to evaluate.
+        eval_dataloader (:obj:`torch.utils.data.DataLoader`): The evaluation dataloader.
+        accelerator (:obj:`accelerate.Accelerator`): The distributed training backend.
+        per_device_eval_batch_size (:obj:`int`): The batch size per device.
+        eval_iters (:obj:`int`, `optional`): The number of iterations to run evaluation for. Defaults to `None` which
+            means that the whole dataset will be used.
+    Returns:
+        :obj:`tuple(torch.FloatTensor, float)`: A tuple with the evaluation loss and the perplexity.
+    """
     model.eval()
     losses = []
     num_eval_steps = len(eval_dataloader)
+    if eval_iters is not None:
+        num_eval_steps = min(num_eval_steps, eval_iters)
     eval_progress_bar = tqdm(range(num_eval_steps), disable=not accelerator.is_local_main_process, position=0, leave=True)
     for step, batch in enumerate(eval_dataloader):
+        if eval_iters is not None and step >= eval_iters:
+            break
+
         with torch.no_grad():
             outputs = model(**batch)
 
@@ -425,8 +448,9 @@ def run_clm(args):
     train_dataloader = DataLoader(
         lm_dataset["train"], shuffle=True, collate_fn=data_collator, batch_size=args.per_device_train_batch_size
     )
+    # we shuffle to get a new random sample each time we evaluate for eval_iters
     eval_dataloader = DataLoader(
-        lm_dataset["validation"], collate_fn=data_collator, batch_size=args.per_device_eval_batch_size
+        lm_dataset["validation"], shuffle=True, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size
     )
 
     # Load pretrained model
@@ -515,6 +539,7 @@ def run_clm(args):
     progress_bar = tqdm(range(num_training_steps), disable=not accelerator.is_local_main_process, position=0, leave=True)
     completed_steps = 0
     starting_epoch = 0
+    consumed_train_tokens = 0
 
     # Potentially load in the weights and states from a previous save
     if args.resume_from_checkpoint is not None:
@@ -537,6 +562,7 @@ def run_clm(args):
             starting_epoch = resume_step // len(train_dataloader)
             completed_steps = resume_step // args.gradient_accumulation_steps
             resume_step -= starting_epoch * len(train_dataloader)
+        consumed_train_tokens += completed_steps * total_batch_size * args.block_size
 
     # update the progress_bar if load from checkpoint
     progress_bar.update(completed_steps)
@@ -592,14 +618,15 @@ def run_clm(args):
                         "train/loss": train_loss,  
                         "train/perplexity": train_perplexity,
                         "train/lr": optimizer.param_groups[0]["lr"],
-                    }, step=step)
+                        "consumed_train_tokens":  completed_steps * total_batch_size * args.block_size
+                    }, step=completed_steps)
                     batch_loss = 0
 
                 if isinstance(eval_steps, int):
                     if completed_steps % eval_steps == 0 and completed_steps > 0:
                         logger.info(f"epoch {epoch}: step {completed_steps}: evaluating model")
                         eval_loss, perplexity = validate_model(
-                            model, eval_dataloader, accelerator, args.per_device_eval_batch_size
+                            model, eval_dataloader, accelerator, args.per_device_eval_batch_size, args.eval_iters
                         )
                         logger.info(
                             f"epoch {epoch}: step {completed_steps}: perplexity: {perplexity} eval_loss: {eval_loss}")
@@ -609,7 +636,8 @@ def run_clm(args):
                                 "eval/perplexity": perplexity,
                                 "epoch": epoch,
                                 "step": completed_steps,
-                            })
+                                "consumed_train_tokens":  completed_steps * total_batch_size * args.block_size
+                            }, step=completed_steps)
                         model.train()
 
                 if isinstance(checkpointing_steps, int):
@@ -620,23 +648,26 @@ def run_clm(args):
                             output_dir = os.path.join(args.output_dir, output_dir)
                         accelerator.save_state(output_dir)
 
-        logger.info(f"epoch {epoch}: step {completed_steps}: evaluating model")
-        eval_loss, perplexity = validate_model(
-            model, eval_dataloader, accelerator, args.per_device_eval_batch_size
-        )
-        logger.info(f"epoch {epoch}: perplexity: {perplexity} eval_loss: {eval_loss}")
-
-        if args.with_tracking:
-            accelerator.log(
-                {
-                    "eval/perplexity": perplexity,
-                    "eval/loss": eval_loss,
-                    "train/epoch_loss": total_loss.item() / len(train_dataloader),
-                    "epoch": epoch,
-                    "step": completed_steps,
-                },
-                step=completed_steps,
+        if args.eval_steps == "epoch":
+            # Evaluate on the whole validation split at the end of each epoch
+            logger.info(f"epoch {epoch}: step {completed_steps}: evaluating model")
+            eval_loss, perplexity = validate_model(
+                model, eval_dataloader, accelerator, args.per_device_eval_batch_size
             )
+            logger.info(f"epoch {epoch}: perplexity: {perplexity} eval_loss: {eval_loss}")
+
+            if args.with_tracking:
+                accelerator.log(
+                    {
+                        "eval/perplexity": perplexity,
+                        "eval/loss": eval_loss,
+                        "train/epoch_loss": total_loss.item() / len(train_dataloader),
+                        "epoch": epoch,
+                        "step": completed_steps,
+                        "consumed_train_tokens": completed_steps * total_batch_size * args.block_size
+                    },
+                    step=completed_steps,
+                )
 
         if args.push_to_hub and epoch < args.num_train_epochs - 1:
             accelerator.wait_for_everyone()
