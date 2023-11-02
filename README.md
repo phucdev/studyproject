@@ -49,7 +49,7 @@ python clp.py apply_clp \
 To train a model on the causal language modeling objective, run:
 
 ```bash
-python run_language_modeling.py --experiment_config=configs/clp_baseline.json
+python run_language_modeling.py --experiment_config=configs/oscar_de_baseline.json
 ```
 
 If you want to train a model on the causal language modeling objective, but with a pure embedding training phase, where we 
@@ -57,10 +57,10 @@ first freeze the transformer layers and train the word embeddings with a high le
 number of training steps and then train the full model with a lower learning rate, then run:
 
 ```bash
-python run_language_modeling.py --experiment_config=configs/clp_embedding_tuning.json
+python run_language_modeling.py --experiment_config=configs/oscar_de_embedding_tuning.json
 ```
 
-You can pass arguments directly via the CLI or by specifying a JSON file with the arguments.
+You can pass arguments directly via the CLI or by specifying a JSON config file with the arguments.
 If you want to track the experiment, set the `--with_tracking` flag and set the `--report_to` parameter
 to the platform of your choice.
 
@@ -70,7 +70,7 @@ accelerate config
 ```
 Then you can launch the script with `accelerate launch`. A complete example would be:
 ```bash
-accelerate launch run_language_modeling.py --experiment_config=configs/clp_embedding_tuning.json --with_tracking --report_to=wandb
+accelerate launch run_language_modeling.py --experiment_config=configs/oscar_de_embedding_tuning.json --with_tracking --report_to=wandb
 ```
 
 

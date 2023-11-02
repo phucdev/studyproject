@@ -119,6 +119,9 @@ def parse_args():
         help="Initial learning rate (after the potential warmup period) to use for the full training.",)
     parser.add_argument("--min_lr", type=float, default=0.0, help="Minimum learning rate during training.")
     parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay to use.")
+    parser.add_argument("--beta1", type=float, default=0.9, help="Adam beta1.")
+    parser.add_argument("--beta2", type=float, default=0.95, help="Adam beta2.")
+    parser.add_argument("--grad_clip", type=float, default=1.0, help="Gradient clipping.")
     parser.add_argument(
         "--gradient_accumulation_steps",
         type=int,
@@ -172,6 +175,18 @@ def parse_args():
         help="Whether the various states should be saved at the end of every n steps, or 'epoch' for each epoch."
     )
     parser.add_argument(
+        "--eval_steps",
+        type=str,
+        default=None,
+        help="Whether to evaluate the model at the end of every n steps, or 'epoch' for each epoch."
+    )
+    parser.add_argument(
+        "--eval_iters",
+        type=int,
+        default=None,
+        help="Number of evaluation iterations."
+    )
+    parser.add_argument(
         "--resume_from_checkpoint",
         type=str,
         default=None,
@@ -194,7 +209,8 @@ def parse_args():
     )
     args = parser.parse_args()
 
-    # If provided, load experiment settings from config file
+    # If provided, load experiment settings from config file.
+    # Be aware that the parameters in the config overwrite the default and CLI parameters.
     if args.experiment_config is not None:
         with open(args.experiment_config) as f:
             config = json.load(f)
@@ -219,6 +235,45 @@ def parse_args():
             raise ValueError("Need an `output_dir` to create a repo when `--push_to_hub` is passed.")
 
     return args
+
+
+def validate_model(model, eval_dataloader, accelerator, per_device_eval_batch_size, eval_iters=None):
+    """Evaluates the model on eval_dataloader and returns the evaluation loss and perplexity.
+    Args:
+        model (:obj:`torch.nn.Module`): The model to evaluate.
+        eval_dataloader (:obj:`torch.utils.data.DataLoader`): The evaluation dataloader.
+        accelerator (:obj:`accelerate.Accelerator`): The distributed training backend.
+        per_device_eval_batch_size (:obj:`int`): The batch size per device.
+        eval_iters (:obj:`int`, `optional`): The number of iterations to run evaluation for. Defaults to `None` which
+            means that the whole dataset will be used.
+    Returns:
+        :obj:`tuple(torch.FloatTensor, float)`: A tuple with the evaluation loss and the perplexity.
+    """
+    model.eval()
+    losses = []
+    num_eval_steps = len(eval_dataloader)
+    if eval_iters is not None:
+        num_eval_steps = min(num_eval_steps, eval_iters)
+    eval_progress_bar = tqdm(range(num_eval_steps), disable=not accelerator.is_local_main_process, position=0, leave=True)
+    for step, batch in enumerate(eval_dataloader):
+        if eval_iters is not None and step >= eval_iters:
+            break
+
+        with torch.no_grad():
+            outputs = model(**batch)
+
+        loss = outputs.loss
+        losses.append(accelerator.gather_for_metrics(loss.repeat(per_device_eval_batch_size)))
+        eval_progress_bar.update(1)
+
+    losses = torch.cat(losses)
+    try:
+        eval_loss = torch.mean(losses)
+        perplexity = math.exp(eval_loss)
+    except OverflowError:
+        perplexity = float("inf")
+
+    return eval_loss, perplexity
 
 
 def run_clm(args):
@@ -393,8 +448,9 @@ def run_clm(args):
     train_dataloader = DataLoader(
         lm_dataset["train"], shuffle=True, collate_fn=data_collator, batch_size=args.per_device_train_batch_size
     )
+    # we shuffle to get a new random sample each time we evaluate for eval_iters
     eval_dataloader = DataLoader(
-        lm_dataset["validation"], collate_fn=data_collator, batch_size=args.per_device_eval_batch_size
+        lm_dataset["validation"], shuffle=True, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size
     )
 
     # Load pretrained model
@@ -426,7 +482,7 @@ def run_clm(args):
             "weight_decay": 0.0,
         },
     ]
-    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate)
+    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate, betas=(args.beta1, args.beta2))
 
     # LR Scheduler
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -458,6 +514,10 @@ def run_clm(args):
     if checkpointing_steps is not None and checkpointing_steps.isdigit():
         checkpointing_steps = int(checkpointing_steps)
 
+    eval_steps = args.eval_steps
+    if eval_steps is not None and eval_steps.isdigit():
+        eval_steps = int(eval_steps)
+
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
     if args.with_tracking:
@@ -476,9 +536,10 @@ def run_clm(args):
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {num_training_steps}")
 
-    progress_bar = tqdm(range(num_training_steps), disable=not accelerator.is_local_main_process)
+    progress_bar = tqdm(range(num_training_steps), disable=not accelerator.is_local_main_process, position=0, leave=True)
     completed_steps = 0
     starting_epoch = 0
+    consumed_train_tokens = 0
 
     # Potentially load in the weights and states from a previous save
     if args.resume_from_checkpoint is not None:
@@ -501,6 +562,7 @@ def run_clm(args):
             starting_epoch = resume_step // len(train_dataloader)
             completed_steps = resume_step // args.gradient_accumulation_steps
             resume_step -= starting_epoch * len(train_dataloader)
+        consumed_train_tokens += completed_steps * total_batch_size * args.block_size
 
     # update the progress_bar if load from checkpoint
     progress_bar.update(completed_steps)
@@ -539,6 +601,7 @@ def run_clm(args):
                 # We keep track of the loss at each epoch
                 total_loss += train_step_loss
                 accelerator.backward(loss)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
@@ -547,56 +610,64 @@ def run_clm(args):
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 completed_steps += 1
-                if args.with_tracking:
-                    # TODO check if this makes sense. We average the loss of a batch (w. parallel, distributed & accumulation) for reporting
-                    train_loss = batch_loss/total_batch_size
+                if args.with_tracking and accelerator.is_main_process:
+                    # https://github.com/huggingface/accelerate/issues/639 loss tracking with gradient accumulation
+                    train_loss = accelerator.gather(batch_loss / accelerator.gradient_accumulation_steps)
                     train_perplexity = math.exp(train_loss)
                     accelerator.log({
                         "train/loss": train_loss,  
                         "train/perplexity": train_perplexity,
                         "train/lr": optimizer.param_groups[0]["lr"],
-                    }, step=step)
+                        "consumed_train_tokens":  completed_steps * total_batch_size * args.block_size
+                    }, step=completed_steps)
                     batch_loss = 0
 
-            if isinstance(checkpointing_steps, int):
-                if completed_steps > 0 and completed_steps % checkpointing_steps == 0:
-                    output_dir = f"step_{completed_steps}"
-                    if args.output_dir is not None:
-                        output_dir = os.path.join(args.output_dir, output_dir)
-                    accelerator.save_state(output_dir)
+                if isinstance(eval_steps, int):
+                    if completed_steps % eval_steps == 0 and completed_steps > 0:
+                        logger.info(f"epoch {epoch}: step {completed_steps}: evaluating model")
+                        eval_loss, perplexity = validate_model(
+                            model, eval_dataloader, accelerator, args.per_device_eval_batch_size, args.eval_iters
+                        )
+                        logger.info(
+                            f"epoch {epoch}: step {completed_steps}: perplexity: {perplexity} eval_loss: {eval_loss}")
+                        if args.with_tracking:
+                            accelerator.log({
+                                "eval/loss": eval_loss,
+                                "eval/perplexity": perplexity,
+                                "epoch": epoch,
+                                "step": completed_steps,
+                                "consumed_train_tokens":  completed_steps * total_batch_size * args.block_size
+                            }, step=completed_steps)
+                        model.train()
 
-        model.eval()
-        losses = []
-        num_eval_steps = len(eval_dataloader)
-        eval_progress_bar = tqdm(range(num_eval_steps))
-        for step, batch in enumerate(eval_dataloader):
-            with torch.no_grad():
-                outputs = model(**batch)
+                if isinstance(checkpointing_steps, int):
+                    if completed_steps > 0 and completed_steps % checkpointing_steps == 0:
+                        logger.info(f"epoch {epoch}: step {completed_steps}: saving checkpoint")
+                        output_dir = f"step_{completed_steps}"
+                        if args.output_dir is not None:
+                            output_dir = os.path.join(args.output_dir, output_dir)
+                        accelerator.save_state(output_dir)
 
-            loss = outputs.loss
-            losses.append(accelerator.gather_for_metrics(loss.repeat(args.per_device_eval_batch_size)))
-            eval_progress_bar.update(1)
-
-        losses = torch.cat(losses)
-        try:
-            eval_loss = torch.mean(losses)
-            perplexity = math.exp(eval_loss)
-        except OverflowError:
-            perplexity = float("inf")
-
-        logger.info(f"epoch {epoch}: perplexity: {perplexity} eval_loss: {eval_loss}")
-
-        if args.with_tracking:
-            accelerator.log(
-                {
-                    "eval/perplexity": perplexity,
-                    "eval/loss": eval_loss,
-                    "train/epoch_loss": total_loss.item() / len(train_dataloader),
-                    "epoch": epoch,
-                    "step": completed_steps,
-                },
-                step=completed_steps,
+        if args.eval_steps == "epoch":
+            # Evaluate on the whole validation split at the end of each epoch
+            logger.info(f"epoch {epoch}: step {completed_steps}: evaluating model")
+            eval_loss, perplexity = validate_model(
+                model, eval_dataloader, accelerator, args.per_device_eval_batch_size
             )
+            logger.info(f"epoch {epoch}: perplexity: {perplexity} eval_loss: {eval_loss}")
+
+            if args.with_tracking:
+                accelerator.log(
+                    {
+                        "eval/perplexity": perplexity,
+                        "eval/loss": eval_loss,
+                        "train/epoch_loss": total_loss.item() / len(train_dataloader),
+                        "epoch": epoch,
+                        "step": completed_steps,
+                        "consumed_train_tokens": completed_steps * total_batch_size * args.block_size
+                    },
+                    step=completed_steps,
+                )
 
         if args.push_to_hub and epoch < args.num_train_epochs - 1:
             accelerator.wait_for_everyone()
@@ -632,6 +703,8 @@ def run_clm(args):
 
             with open(os.path.join(args.output_dir, "all_results.json"), "w") as f:
                 json.dump({"perplexity": perplexity}, f)
+            with open(os.path.join(args.output_dir, "training_args.json"), "w") as f:
+                json.dump(vars(args), f)
 
 
 def main():
