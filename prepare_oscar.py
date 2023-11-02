@@ -110,6 +110,7 @@ def preprocess_dataset(train_file: Union[str, Path], validation_file: Union[str,
         batched=True,
         num_proc=preprocessing_num_workers,
         remove_columns=dataset["train"].column_names,
+        desc="Running tokenizer on dataset",
     )
 
     # Main data processing function that will concatenate all texts from our dataset and generate chunks of block_size.
@@ -129,7 +130,12 @@ def preprocess_dataset(train_file: Union[str, Path], validation_file: Union[str,
         result["labels"] = result["input_ids"].copy()
         return result
 
-    lm_dataset = tokenized_dataset.map(group_texts, batched=True, num_proc=preprocessing_num_workers)
+    lm_dataset = tokenized_dataset.map(
+        group_texts,
+        batched=True,
+        num_proc=preprocessing_num_workers,
+        desc=f"Grouping texts in chunks of {block_size}"
+    )
     lm_dataset.save_to_disk(save_preprocessed_dataset_path)
 
 
