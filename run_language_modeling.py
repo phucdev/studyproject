@@ -617,7 +617,7 @@ def run_clm(args):
                     # https://github.com/huggingface/accelerate/issues/639 loss tracking with gradient accumulation
                     # script seems to get stuck when calling accelerator.gather on batch loss, so we only track
                     # average train loss on the main process
-                    train_loss = batch_loss
+                    train_loss = float(batch_loss)
                     train_perplexity = math.exp(train_loss)
                     log_dict = {
                         "train/loss": train_loss,
