@@ -254,7 +254,8 @@ def validate_model(model, eval_dataloader, accelerator, per_device_eval_batch_si
     num_eval_steps = len(eval_dataloader)
     if eval_iters is not None:
         num_eval_steps = min(num_eval_steps, eval_iters)
-    eval_progress_bar = tqdm(range(num_eval_steps), disable=not accelerator.is_local_main_process, position=0, leave=True)
+    eval_progress_bar = tqdm(range(num_eval_steps), disable=not accelerator.is_local_main_process,
+                             position=0, leave=True, desc="Evaluating")
     for step, batch in enumerate(eval_dataloader):
         if eval_iters is not None and step >= eval_iters:
             break
@@ -536,7 +537,8 @@ def run_clm(args):
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {num_training_steps}")
 
-    progress_bar = tqdm(range(num_training_steps), disable=not accelerator.is_local_main_process, position=0, leave=True)
+    progress_bar = tqdm(range(num_training_steps), disable=not accelerator.is_local_main_process,
+                        position=0, leave=True, desc="Training")
     completed_steps = 0
     starting_epoch = 0
     consumed_train_tokens = 0
@@ -597,11 +599,12 @@ def run_clm(args):
                 outputs = model(**batch)
                 loss = outputs.loss
                 train_step_loss = loss.detach().float()
-                batch_loss += train_step_loss
+                batch_loss += train_step_loss / accelerator.gradient_accumulation_steps
                 # We keep track of the loss at each epoch
                 total_loss += train_step_loss
                 accelerator.backward(loss)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
+                if accelerator.sync_gradients:
+                    accelerator.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
@@ -612,14 +615,18 @@ def run_clm(args):
                 completed_steps += 1
                 if args.with_tracking and accelerator.is_main_process:
                     # https://github.com/huggingface/accelerate/issues/639 loss tracking with gradient accumulation
-                    train_loss = accelerator.gather(batch_loss / accelerator.gradient_accumulation_steps)
+                    # script seems to get stuck when calling accelerator.gather on batch loss, so we only track
+                    # average train loss on the main process
+                    train_loss = batch_loss
                     train_perplexity = math.exp(train_loss)
-                    accelerator.log({
-                        "train/loss": train_loss,  
+                    log_dict = {
+                        "train/loss": train_loss,
                         "train/perplexity": train_perplexity,
                         "train/lr": optimizer.param_groups[0]["lr"],
-                        "consumed_train_tokens":  completed_steps * total_batch_size * args.block_size
-                    }, step=completed_steps)
+                        "consumed_train_tokens": completed_steps * total_batch_size * args.block_size
+                    }
+                    progress_bar.set_postfix(log_dict)
+                    accelerator.log(log_dict, step=completed_steps)
                     batch_loss = 0
 
                 if isinstance(eval_steps, int):
