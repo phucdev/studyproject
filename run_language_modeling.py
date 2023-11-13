@@ -488,17 +488,15 @@ def run_clm(args):
     # LR Scheduler
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
     num_training_steps = args.num_train_epochs * num_update_steps_per_epoch
-    pure_embedding_training_steps = math.ceil(num_training_steps * args.pure_embedding_training_percentage / 100)
-    warmup_embedding_steps = math.ceil(pure_embedding_training_steps * args.warmup_percentage / 100)
-    warmup_and_embedding_training_steps = warmup_embedding_steps + pure_embedding_training_steps
     # custom lr scheduler with cosine decay and one warmup phase each for the embedding training and the full training
     lr_scheduler = get_custom_lr_scheduler(
         optimizer=optimizer,
         warmup_percentage=args.warmup_percentage,
-        num_training_steps=num_training_steps,  # TODO run_clm_no_trainer multiplies this with gradient_accumulation_steps
+        num_training_steps=num_training_steps,
         pure_embedding_training_percentage=args.pure_embedding_training_percentage,
         min_lr=args.min_lr
     )
+    logger.info(f"num_training_steps: {num_training_steps} before accelerator.prepare")
 
     # Prepare everything with our `accelerator`.
     model, optimizer, train_dataloader, eval_dataloader, lr_scheduler = accelerator.prepare(
@@ -508,8 +506,12 @@ def run_clm(args):
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
     num_training_steps = args.num_train_epochs * num_update_steps_per_epoch
+    pure_embedding_training_steps = math.ceil(num_training_steps * args.pure_embedding_training_percentage / 100)
+    warmup_embedding_steps = math.ceil(pure_embedding_training_steps * args.warmup_percentage / 100)
+    warmup_and_embedding_training_steps = warmup_embedding_steps + pure_embedding_training_steps
     # Afterwards we recalculate our number of training epochs
     args.num_train_epochs = math.ceil(num_training_steps / num_update_steps_per_epoch)
+    logger.info(f"num_training_steps: {num_training_steps} after accelerator.prepare")
 
     checkpointing_steps = args.checkpointing_steps
     if checkpointing_steps is not None and checkpointing_steps.isdigit():
@@ -580,8 +582,6 @@ def run_clm(args):
             active_dataloader = train_dataloader
         for step, batch in enumerate(active_dataloader):
             if transformer_layers_are_frozen and completed_steps >= warmup_and_embedding_training_steps:
-                # wait for all processes to reach this point before unfreezing transformer layers, otherwise
-                # we might get weird learning rate behavior
                 accelerator.wait_for_everyone()
                 # unfreeze transformer layers
                 if isinstance(model, torch.nn.parallel.DistributedDataParallel):
