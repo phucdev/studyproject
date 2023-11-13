@@ -580,6 +580,9 @@ def run_clm(args):
             active_dataloader = train_dataloader
         for step, batch in enumerate(active_dataloader):
             if transformer_layers_are_frozen and completed_steps >= warmup_and_embedding_training_steps:
+                # wait for all processes to reach this point before unfreezing transformer layers, otherwise
+                # we might get weird learning rate behavior
+                accelerator.wait_for_everyone()
                 # unfreeze transformer layers
                 if isinstance(model, torch.nn.parallel.DistributedDataParallel):
                     for param in model.module.gpt_neox.parameters():
