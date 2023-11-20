@@ -135,6 +135,12 @@ def parse_args():
         help="Percentage of training steps to train only the embedding layer."
     )
     parser.add_argument(
+        "--not_freeze_transformer_layers",
+        action="store_true",
+        default=False,
+        help="Do not freeze transformer layers during pure embedding training phase (for testing purposes)."
+    )
+    parser.add_argument(
         "--warmup_percentage",
         type=int,
         default=10,
@@ -206,6 +212,12 @@ def parse_args():
             ' `"wandb"`, `"comet_ml"` and `"clearml"`. Use `"all"` (default) to report to all integrations.'
             "Only applicable when `--with_tracking` is passed."
         ),
+    )
+    parser.add_argument(
+        "--project_name",
+        type=str,
+        default="CLP study project",
+        help="The name of the project to log to. Only applicable when `--with_tracking` is passed."
     )
     args = parser.parse_args()
 
@@ -460,13 +472,16 @@ def run_clm(args):
     logger.info(f"Loaded model {args.model_name_or_path}")
 
     if args.pure_embedding_training_percentage > 0:
-        # freeze transformer layer to only train embeddings, the language modeling head (embed_out) is not affected
-        for param in model.gpt_neox.parameters():
-            param.requires_grad = False
-        # unfreeze word embeddings
-        model.gpt_neox.embed_in.weight.requires_grad = True
+        if args.not_freeze_transformer_layers:  # for testing purposes
+            logger.info(f"Accelerated training for {args.pure_embedding_training_percentage}% of training steps without freezing transformer layers")
+        else:
+            # freeze transformer layer to only train embeddings, the language modeling head (embed_out) is not affected
+            for param in model.gpt_neox.parameters():
+                param.requires_grad = False
+            # unfreeze word embeddings
+            model.gpt_neox.embed_in.weight.requires_grad = True
+            logger.info(f"Freezing transformer layers for {args.pure_embedding_training_percentage}% of training steps")
         transformer_layers_are_frozen = True
-        logger.info(f"Freezing transformer layers for {args.pure_embedding_training_percentage}% of training steps")
     else:
         transformer_layers_are_frozen = False
 
@@ -522,12 +537,12 @@ def run_clm(args):
         eval_steps = int(eval_steps)
 
     # We need to initialize the trackers we use, and also store our configuration.
-    # The trackers initializes automatically on the main process.
+    # The trackers initialize automatically on the main process.
     if args.with_tracking:
         experiment_config = vars(args)
         # TensorBoard cannot log Enums, need the raw value
         experiment_config["lr_scheduler_type"] = "2 phase custom LR scheduler with warmup, cosine decay"
-        accelerator.init_trackers("CLP study project", experiment_config)
+        accelerator.init_trackers(args.project_name, experiment_config)
 
     # Training
     total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
@@ -597,7 +612,10 @@ def run_clm(args):
                 else:
                     lr_scheduler.base_lrs = [args.full_training_learning_rate for _ in lr_scheduler.base_lrs]
                 transformer_layers_are_frozen = False
-                logger.info(f"epoch {epoch}: step {completed_steps}: unfreezing transformer layers")
+                if args.not_freeze_transformer_layers:
+                    logger.info(f"epoch {epoch}: step {completed_steps}: finish accelerated training")
+                else:
+                    logger.info(f"epoch {epoch}: step {completed_steps}: unfreezing transformer layers")
             with accelerator.accumulate(model):
                 outputs = model(**batch)
                 loss = outputs.loss
@@ -626,7 +644,7 @@ def run_clm(args):
                         "train/loss": train_loss,
                         "train/perplexity": train_perplexity,
                         "train/lr": optimizer.param_groups[0]["lr"],
-                        "consumed_train_tokens": completed_steps * total_batch_size * args.block_size
+                        "consumed_train_tokens": completed_steps * total_batch_size * args.block_size   # TODO this might not be accurate
                     }
                     progress_bar.set_postfix(log_dict)
                     accelerator.log(log_dict, step=completed_steps)
