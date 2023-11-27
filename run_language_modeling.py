@@ -141,6 +141,12 @@ def parse_args():
         help="Do not freeze transformer layers during pure embedding training phase (for testing purposes)."
     )
     parser.add_argument(
+        "--embedding_tuning_warmup_percentage",
+        type=int,
+        default=10,
+        help="Percentage of embedding tuning steps to warmup to the learning rate."
+    )
+    parser.add_argument(
         "--warmup_percentage",
         type=int,
         default=10,
@@ -509,7 +515,8 @@ def run_clm(args):
         warmup_percentage=args.warmup_percentage,
         num_training_steps=num_training_steps,
         pure_embedding_training_percentage=args.pure_embedding_training_percentage,
-        min_lr=args.min_lr
+        min_lr=args.min_lr,
+        embedding_tuning_warmup_percentage=args.embedding_tuning_warmup_percentage
     )
     logger.info(f"num_training_steps: {num_training_steps} before accelerator.prepare")
 
@@ -522,7 +529,7 @@ def run_clm(args):
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
     num_training_steps = args.num_train_epochs * num_update_steps_per_epoch
     pure_embedding_training_steps = math.ceil(num_training_steps * args.pure_embedding_training_percentage / 100)
-    warmup_embedding_steps = math.ceil(pure_embedding_training_steps * args.warmup_percentage / 100)
+    warmup_embedding_steps = math.ceil(pure_embedding_training_steps * args.embedding_tuning_warmup_percentage / 100)
     warmup_and_embedding_training_steps = warmup_embedding_steps + pure_embedding_training_steps
     # Afterwards we recalculate our number of training epochs
     args.num_train_epochs = math.ceil(num_training_steps / num_update_steps_per_epoch)
