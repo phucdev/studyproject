@@ -137,6 +137,18 @@ def parse_args():
         help="Percentage of training steps to train only the embedding layer."
     )
     parser.add_argument(
+        "--not_freeze_transformer_layers",
+        action="store_true",
+        default=False,
+        help="Do not freeze transformer layers during pure embedding training phase (for testing purposes)."
+    )
+    parser.add_argument(
+        "--embedding_tuning_warmup_percentage",
+        type=int,
+        default=10,
+        help="Percentage of embedding tuning steps to warmup to the learning rate."
+    )
+    parser.add_argument(
         "--warmup_percentage",
         type=int,
         default=10,
@@ -179,14 +191,27 @@ def parse_args():
         help="Whether to evaluate the model at the end of every n steps, or 'epoch' for each epoch."
     )
     parser.add_argument(
+        "--eval_iters",
+        type=int,
+        default=None,
+        help="Number of evaluation iterations."
+    )
+    parser.add_argument(
         "--resume_from_checkpoint",
         type=str,
         default=None,
         help="If the training should continue from a checkpoint folder.",
     )
+    parser.add_argument(
+        "--project_name",
+        type=str,
+        default="CLP study project",
+        help="The name of the project to log to. Only applicable when `--with_tracking` is passed."
+    )
     args = parser.parse_args()
 
-    # If provided, load experiment settings from config file
+    # If provided, load experiment settings from config file.
+    # Be aware that the parameters in the config overwrite the default and CLI parameters.
     if args.experiment_config is not None:
         with open(args.experiment_config) as f:
             config = json.load(f)
@@ -225,14 +250,19 @@ def save_checkpoint(output_dir, model, optimizer, lr_scheduler, epoch, loss, com
     }, output_file)
 
 
-def validate_model(model, eval_dataloader, device):
+def validate_model(model, eval_dataloader, eval_iters=None):
     model.eval()
     losses = []
     num_eval_steps = len(eval_dataloader)
-    eval_progress_bar = tqdm(range(num_eval_steps), position=0, leave=True)
+    if eval_iters is not None:
+        num_eval_steps = min(num_eval_steps, eval_iters)
+    eval_progress_bar = tqdm(range(num_eval_steps), position=0, leave=True, desc="Evaluating")
     for step, batch in enumerate(eval_dataloader):
+        if eval_iters is not None and step >= eval_iters:
+            break
+
         with torch.no_grad():
-            batch = {k: v.to(device) for k, v in batch.items()}
+            batch = {k: v.to(model.device) for k, v in batch.items()}
             outputs = model(**batch)
 
         loss = outputs.loss
@@ -240,9 +270,9 @@ def validate_model(model, eval_dataloader, device):
         eval_progress_bar.update(1)
 
     losses = torch.stack(losses)
+    eval_loss = torch.mean(losses)
     try:
-        eval_loss = torch.mean(losses)
-        perplexity = math.exp(eval_loss)
+        perplexity = math.exp(eval_loss.item())
     except OverflowError:
         perplexity = float("inf")
 
@@ -250,7 +280,7 @@ def validate_model(model, eval_dataloader, device):
 
 def run_clm(args):
     wandb.init(
-        project="CLP study project",
+        project=args.project_name,
         config=vars(args),
     )
 
@@ -316,6 +346,7 @@ def run_clm(args):
                     data_files=data_files,
                     split=f"train[{args.validation_split_percentage}%:]"
                 )
+            logger.info(f"Loaded dataset from files {data_files}")
 
         def preprocess_function(examples):
             return tokenizer([x for x in examples["text"]])
@@ -325,6 +356,7 @@ def run_clm(args):
             batched=True,
             num_proc=args.preprocessing_num_workers,
             remove_columns=dataset["train"].column_names,
+            desc="Running tokenizer on dataset",
         )
 
         # Main data processing function that will concatenate all texts from our dataset and generate chunks of block_size.
@@ -344,9 +376,15 @@ def run_clm(args):
             result["labels"] = result["input_ids"].copy()
             return result
 
-        lm_dataset = tokenized_dataset.map(group_texts, batched=True, num_proc=args.preprocessing_num_workers)
+        lm_dataset = tokenized_dataset.map(
+            group_texts,
+            batched=True,
+            num_proc=args.preprocessing_num_workers,
+            desc=f"Grouping texts in chunks of {args.block_size}",
+        )
         if args.save_preprocessed_dataset_path is not None:
             lm_dataset.save_to_disk(args.save_preprocessed_dataset_path)
+            logger.info(f"Saved preprocessed dataset to {args.save_preprocessed_dataset_path}")
 
     lm_dataset.set_format("torch")
     if args.max_train_samples is not None:
@@ -367,8 +405,9 @@ def run_clm(args):
     train_dataloader = DataLoader(
         lm_dataset["train"], shuffle=True, collate_fn=data_collator, batch_size=args.per_device_train_batch_size
     )
+    # we shuffle to get a new random sample each time we evaluate for eval_iters
     eval_dataloader = DataLoader(
-        lm_dataset["validation"], collate_fn=data_collator, batch_size=args.per_device_eval_batch_size
+        lm_dataset["validation"], shuffle=True, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size
     )
 
     # Load pretrained model
@@ -377,11 +416,15 @@ def run_clm(args):
     logger.info(f"Loaded model {args.model_name_or_path}")
 
     if args.pure_embedding_training_percentage > 0:
-        # freeze transformer layer to only train embeddings, the language modeling head (embed_out) is not affected
-        for param in model.gpt_neox.parameters():
-            param.requires_grad = False
-        # unfreeze word embeddings
-        model.gpt_neox.embed_in.weight.requires_grad = True
+        if args.not_freeze_transformer_layers:  # for testing purposes
+            logger.info(f"Accelerated training for {args.pure_embedding_training_percentage}% of training steps without freezing transformer layers")
+        else:
+            # freeze transformer layer to only train embeddings, the language modeling head (embed_out) is not affected
+            for param in model.gpt_neox.parameters():
+                param.requires_grad = False
+            # unfreeze word embeddings
+            model.gpt_neox.embed_in.weight.requires_grad = True
+            logger.info(f"Freezing transformer layers for {args.pure_embedding_training_percentage}% of training steps")
         transformer_layers_are_frozen = True
     else:
         transformer_layers_are_frozen = False
@@ -415,7 +458,8 @@ def run_clm(args):
         warmup_percentage=args.warmup_percentage,
         num_training_steps=num_training_steps,
         pure_embedding_training_percentage=args.pure_embedding_training_percentage,
-        min_lr=args.min_lr
+        min_lr=args.min_lr,
+        embedding_tuning_warmup_percentage=args.embedding_tuning_warmup_percentage
     )
 
     checkpointing_steps = args.checkpointing_steps
@@ -436,9 +480,10 @@ def run_clm(args):
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {num_training_steps}")
 
-    progress_bar = tqdm(range(num_training_steps), position=0, leave=True)
+    progress_bar = tqdm(range(num_training_steps), position=0, leave=True, desc="Training")
     completed_steps = 0
     starting_epoch = 0
+    consumed_train_tokens = 0
 
     # Potentially load in the weights and states from a previous save
     if args.resume_from_checkpoint is not None:
@@ -462,6 +507,9 @@ def run_clm(args):
             starting_epoch = resume_step // len(train_dataloader)
             completed_steps = resume_step // args.gradient_accumulation_steps
             resume_step -= starting_epoch * len(train_dataloader)
+        consumed_train_tokens += completed_steps * total_batch_size * args.block_size
+    else:
+        resume_step = None
 
     # update the progress_bar if load from checkpoint
     progress_bar.update(completed_steps)
@@ -480,10 +528,13 @@ def run_clm(args):
                 # unfreeze transformer layers
                 for param in model.gpt_neox.parameters():
                     param.requires_grad = True
-                # set new learning rate for full training and decay to 0.0 for the full training
+                # set new learning rate for full training
                 lr_scheduler.base_lrs = [args.full_training_learning_rate for _ in lr_scheduler.base_lrs]
                 transformer_layers_are_frozen = False
-                logger.info(f"epoch {epoch}: step {completed_steps}: unfreezing transformer layers")
+                if args.not_freeze_transformer_layers:
+                    logger.info(f"epoch {epoch}: step {completed_steps}: finish accelerated training")
+                else:
+                    logger.info(f"epoch {epoch}: step {completed_steps}: unfreezing transformer layers")
 
             batch = {k: v.to(model.device) for k, v in batch.items()}
             outputs = model(**batch)
@@ -500,7 +551,7 @@ def run_clm(args):
                     "train/train_loss": accumulated_loss,
                     "train/perplexity": perplexity,
                     "train/lr": optimizer.param_groups[0]["lr"],
-                })
+                }, step=completed_steps)
                 accumulated_loss = 0
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
                 optimizer.step()
@@ -512,28 +563,32 @@ def run_clm(args):
                 if isinstance(eval_steps, int):
                     if completed_steps % eval_steps == 0 and completed_steps > 0:
                         logger.info(f"epoch {epoch}: step {completed_steps}: evaluating model")
-                        eval_loss, perplexity = validate_model(model, eval_dataloader, model.device)
+                        eval_loss, perplexity = validate_model(model, eval_dataloader, args.eval_iters)
                         logger.info(f"epoch {epoch}: step {completed_steps}: perplexity: {perplexity} eval_loss: {eval_loss}")
                         wandb.log({
-                            "val/eval_loss": eval_loss,
-                            "val/perplexity": perplexity,
-                        })
+                            "eval/loss": eval_loss,
+                            "eval/perplexity": perplexity,
+                            "consumed_train_tokens":  completed_steps * total_batch_size * args.block_size
+                            }, step=completed_steps)
                         model.train()
 
                 if isinstance(checkpointing_steps, int):
-                    if completed_steps % checkpointing_steps == 0 and completed_steps > 0:
+                    if completed_steps > 0 and completed_steps % checkpointing_steps == 0:
                         logger.info(f"epoch {epoch}: step {completed_steps}: saving checkpoint")
                         save_checkpoint(
                             args.output_dir, model, optimizer, lr_scheduler, epoch, loss, completed_steps=completed_steps
                         )
 
-        logger.info(f"epoch {epoch}: step {completed_steps}: evaluating model")
-        eval_loss, perplexity = validate_model(model, eval_dataloader, model.device)
-        logger.info(f"epoch {epoch}: perplexity: {perplexity} eval_loss: {eval_loss}")
-        wandb.log({
-            "val/eval_loss": eval_loss,
-            "val/perplexity": perplexity,
-        })
+        if args.eval_steps == "epoch":
+            logger.info(f"epoch {epoch}: step {completed_steps}: evaluating model")
+            eval_loss, perplexity = validate_model(model, eval_dataloader, model.device)
+            logger.info(f"epoch {epoch}: perplexity: {perplexity} eval_loss: {eval_loss}")
+            wandb.log({
+                "eval/loss": eval_loss,
+                "eval/perplexity": perplexity,
+                "train/epoch_loss": total_loss / len(train_dataloader),
+                "consumed_train_tokens": completed_steps * total_batch_size * args.block_size
+            }, step=completed_steps)
 
         if args.checkpointing_steps == "epoch":
             logger.info(f"epoch {epoch}: step {completed_steps}: saving checkpoint")
