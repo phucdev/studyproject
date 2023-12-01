@@ -109,30 +109,24 @@ class CustomLambdaLR(LRScheduler):
 
 
 def _get_cosine_schedule_with_warmup_embedding_tuning_lr_lambda(
-        current_step: int, *, warmup_percentage: int, num_training_steps: int, num_cycles: float,
-        pure_embedding_training_percentage: int, embedding_tuning_warmup_percentage: int
+        current_step: int, *, num_training_steps: int, embedding_tuning_steps: int, embedding_tuning_warmup_steps: int,
+        full_training_warmup_steps: int, num_cycles: float
 ):
-    num_pure_embedding_training_steps = math.ceil(num_training_steps*pure_embedding_training_percentage/100)
-    warmup_embedding_steps = math.ceil(num_pure_embedding_training_steps*embedding_tuning_warmup_percentage/100)
-    warmup_and_embedding_training_steps = warmup_embedding_steps + num_pure_embedding_training_steps
-
-    full_training_steps = num_training_steps - warmup_and_embedding_training_steps
-    warmup_full_training_steps = math.ceil(full_training_steps*warmup_percentage/100)
-    full_training_start_step = warmup_and_embedding_training_steps + warmup_full_training_steps
+    full_training_start_step = embedding_tuning_steps + full_training_warmup_steps
 
     # embedding training warmup phase
-    if current_step < warmup_embedding_steps:
-        return float(current_step) / float(max(1, warmup_embedding_steps))
+    if current_step < embedding_tuning_warmup_steps:
+        return float(current_step) / float(max(1, embedding_tuning_warmup_steps))
 
     # pure embedding training phase
-    elif warmup_embedding_steps <= current_step < warmup_and_embedding_training_steps:
-        numerator = float(current_step - warmup_embedding_steps)
-        denominator = float(max(1, num_pure_embedding_training_steps))
+    elif embedding_tuning_warmup_steps <= current_step < embedding_tuning_steps:
+        numerator = float(current_step - embedding_tuning_warmup_steps)
+        denominator = float(max(1, embedding_tuning_steps - embedding_tuning_warmup_steps))
         progress = numerator / denominator
 
     # full training phase warmup phase
-    elif warmup_and_embedding_training_steps <= current_step < full_training_start_step:
-        return float(current_step - warmup_and_embedding_training_steps) / float(max(1, warmup_full_training_steps))
+    elif embedding_tuning_steps <= current_step < full_training_start_step:
+        return float(current_step - embedding_tuning_steps) / float(max(1, full_training_warmup_steps))
 
     # full training
     else:
@@ -143,29 +137,29 @@ def _get_cosine_schedule_with_warmup_embedding_tuning_lr_lambda(
 
 
 def _get_cosine_schedule_with_warmup_lr_lambda(
-        current_step: int, *, warmup_percentage: int, num_training_steps: int, num_cycles: float):
-    warmup_steps = math.ceil(num_training_steps*warmup_percentage/100)
+        current_step: int, *, warmup_steps: int, num_training_steps: int, num_cycles: float):
     if current_step < warmup_steps:
         return float(current_step) / float(max(1, warmup_steps))
     progress = float(current_step - warmup_steps) / float(max(1, num_training_steps - warmup_steps))
     return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress * float(num_cycles) * 2.0)))
 
 
-def get_custom_lr_scheduler(optimizer, warmup_percentage, num_training_steps, pure_embedding_training_percentage,
-                            num_cycles: float = 0.5, min_lr: float = 0.0, embedding_tuning_warmup_percentage: int = 0):
-    if pure_embedding_training_percentage > 0:
+def get_custom_lr_scheduler(optimizer, num_training_steps: int, embedding_tuning_warmup_steps: int = 0,
+                            embedding_tuning_steps:int = 0, full_training_warmup_steps: int = 0,
+                            num_cycles: float = 0.5, min_lr: float = 0.0):
+    if embedding_tuning_steps > 0:
         lr_lambda = partial(
             _get_cosine_schedule_with_warmup_embedding_tuning_lr_lambda,
-            warmup_percentage=warmup_percentage,
             num_training_steps=num_training_steps,
-            pure_embedding_training_percentage=pure_embedding_training_percentage,
-            num_cycles=num_cycles,
-            embedding_tuning_warmup_percentage=embedding_tuning_warmup_percentage
+            embedding_tuning_warmup_steps=embedding_tuning_warmup_steps,
+            embedding_tuning_steps=embedding_tuning_steps,
+            full_training_warmup_steps=full_training_warmup_steps,
+            num_cycles=num_cycles
         )
     else:
         lr_lambda = partial(
             _get_cosine_schedule_with_warmup_lr_lambda,
-            warmup_percentage=warmup_percentage,
+            warmup_steps=full_training_warmup_steps,
             num_training_steps=num_training_steps,
             num_cycles=num_cycles
         )

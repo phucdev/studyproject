@@ -97,6 +97,12 @@ def parse_args():
         help="For debugging purposes or quicker training, truncate the number of evaluation examples to this value if set."
     )
     parser.add_argument(
+        "--per_device_embedding_tuning_batch_size",
+        type=int,
+        default=None,
+        help="Batch size (per device) for the training dataloader during embedding tuning.",
+    )
+    parser.add_argument(
         "--per_device_train_batch_size",
         type=int,
         default=8,
@@ -131,7 +137,7 @@ def parse_args():
         help="Number of updates steps to accumulate before performing a backward/update pass.",
     )
     parser.add_argument(
-        "--pure_embedding_training_percentage",
+        "--embedding_tuning_percentage",
         type=int,
         default=0,
         help="Percentage of training steps to train only the embedding layer."
@@ -230,6 +236,16 @@ def parse_args():
             extension = args.validation_file.split(".")[-1]
             if extension not in ["csv", "json", "txt"]:
                 raise ValueError("`validation_file` should be a csv, json or txt file.")
+
+    if args.per_device_embedding_tuning_batch_size is not None:
+        if args.resume_from_checkpoint is not None:
+            raise ValueError("Resuming from checkpoint is not supported when training with variable batch sizes.")
+        if args.num_train_epochs > 1:
+            raise ValueError("Training for multiple epochs with variable batch sizes is currently not supported.")
+        if args.embedding_tuning_percentage == 0:
+            raise ValueError("Training with variable batch sizes requires embedding_tuning_percentage > 0.")
+        if args.per_device_embedding_tuning_batch_size == args.per_device_train_batch_size:
+            args.per_device_embedding_tuning_batch_size = None
 
     return args
 
@@ -399,12 +415,30 @@ def run_clm(args):
     for index in random.sample(range(len(lm_dataset["train"])), 3):
         logger.info(f"Sample {index} of the training set: {lm_dataset['train'][index]}.")
 
-    tokenizer.pad_token = tokenizer.eos_token   # TODO not in run_clm_no_trainer.py, but in run_clm.py with HF Trainer
+    tokenizer.pad_token = tokenizer.eos_token
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
+    if args.per_device_embedding_tuning_batch_size is not None:
+        # Split training data into embedding tuning and full training data
+        embedding_tuning_num_samples = math.floor(
+            len(lm_dataset["train"]) * args.embedding_tuning_percentage / 100)
+        full_training_num_samples = len(lm_dataset["train"]) - embedding_tuning_num_samples
+        embedding_tuning_training_data, full_training_data = torch.utils.data.random_split(lm_dataset["train"], [
+            embedding_tuning_num_samples, full_training_num_samples])
+        embedding_tuning_dataloader = DataLoader(
+            embedding_tuning_training_data, shuffle=True, collate_fn=data_collator, batch_size=args.per_device_embedding_tuning_batch_size
+        )
+        full_training_dataloader = DataLoader(
+            full_training_data, shuffle=True, collate_fn=data_collator, batch_size=args.per_device_train_batch_size
+        )
+    else:
+        embedding_tuning_dataloader = None
+        full_training_dataloader = None
+    # For multi-epoch training we will need to use a train dataloader of the whole training data or reinitialize the embedding tuning dataloader with the normal training batch size
     train_dataloader = DataLoader(
         lm_dataset["train"], shuffle=True, collate_fn=data_collator, batch_size=args.per_device_train_batch_size
     )
+
     # we shuffle to get a new random sample each time we evaluate for eval_iters
     eval_dataloader = DataLoader(
         lm_dataset["validation"], shuffle=True, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size
@@ -415,16 +449,16 @@ def run_clm(args):
     model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path, config=config)
     logger.info(f"Loaded model {args.model_name_or_path}")
 
-    if args.pure_embedding_training_percentage > 0:
+    if args.embedding_tuning_percentage > 0:
         if args.not_freeze_transformer_layers:  # for testing purposes
-            logger.info(f"Accelerated training for {args.pure_embedding_training_percentage}% of training steps without freezing transformer layers")
+            logger.info(f"Accelerated training for {args.embedding_tuning_percentage}% of training steps without freezing transformer layers")
         else:
             # freeze transformer layer to only train embeddings, the language modeling head (embed_out) is not affected
             for param in model.gpt_neox.parameters():
                 param.requires_grad = False
             # unfreeze word embeddings
             model.gpt_neox.embed_in.weight.requires_grad = True
-            logger.info(f"Freezing transformer layers for {args.pure_embedding_training_percentage}% of training steps")
+            logger.info(f"Freezing transformer layers for {args.embedding_tuning_percentage}% of training steps")
         transformer_layers_are_frozen = True
     else:
         transformer_layers_are_frozen = False
@@ -447,20 +481,28 @@ def run_clm(args):
     optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate, betas=(args.beta1, args.beta2))
 
     # LR Scheduler
-    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
-    num_training_steps = args.num_train_epochs * num_update_steps_per_epoch
-    pure_embedding_training_steps = math.ceil(num_training_steps * args.pure_embedding_training_percentage / 100)
-    warmup_embedding_steps = math.ceil(pure_embedding_training_steps * args.warmup_percentage / 100)
-    warmup_and_embedding_training_steps = warmup_embedding_steps + pure_embedding_training_steps
+    if embedding_tuning_dataloader is not None and full_training_dataloader is not None:
+        # Variable batch size training
+        # no support for multi epoch training yet
+        # no gradient accumulation for embedding tuning with variable batch size since we want very low batch sizes
+        embedding_tuning_steps = len(embedding_tuning_dataloader)
+        embedding_tuning_warmup_steps = math.ceil(embedding_tuning_steps * args.embedding_tuning_warmup_percentage / 100)
+        full_training_steps = math.ceil(len(full_training_dataloader) / args.gradient_accumulation_steps)
+        full_training_warmup_steps = math.ceil(full_training_steps * args.warmup_percentage / 100)
+        num_training_steps = embedding_tuning_steps + full_training_steps
+    else:
+        # Normal training with one batch size
+        num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+        num_training_steps = args.num_train_epochs * num_update_steps_per_epoch
+        embedding_tuning_steps = math.ceil(num_training_steps * args.embedding_tuning_percentage / 100)
+        embedding_tuning_warmup_steps = math.ceil(embedding_tuning_steps * args.embedding_tuning_warmup_percentage / 100)
+        full_training_steps = num_training_steps - embedding_tuning_steps
+        full_training_warmup_steps = math.ceil(full_training_steps * args.warmup_percentage / 100)
     # custom lr scheduler with cosine decay and one warmup phase each for the embedding training and the full training
-    lr_scheduler = get_custom_lr_scheduler(
-        optimizer=optimizer,
-        warmup_percentage=args.warmup_percentage,
-        num_training_steps=num_training_steps,
-        pure_embedding_training_percentage=args.pure_embedding_training_percentage,
-        min_lr=args.min_lr,
-        embedding_tuning_warmup_percentage=args.embedding_tuning_warmup_percentage
-    )
+    lr_scheduler = get_custom_lr_scheduler(optimizer=optimizer, num_training_steps=num_training_steps,
+                                           embedding_tuning_warmup_steps=embedding_tuning_warmup_steps,
+                                           embedding_tuning_steps=embedding_tuning_steps,
+                                           full_training_warmup_steps=full_training_warmup_steps, min_lr=args.min_lr)
 
     checkpointing_steps = args.checkpointing_steps
     if checkpointing_steps is not None and checkpointing_steps.isdigit():
@@ -481,12 +523,15 @@ def run_clm(args):
     logger.info(f"  Total optimization steps = {num_training_steps}")
 
     progress_bar = tqdm(range(num_training_steps), position=0, leave=True, desc="Training")
+    loss = math.inf
+    perplexity = math.inf
     completed_steps = 0
     starting_epoch = 0
     consumed_train_tokens = 0
+    embedding_tuning = True
 
     # Potentially load in the weights and states from a previous save
-    if args.resume_from_checkpoint is not None:
+    if args.resume_from_checkpoint is not None and args.per_device_embedding_tuning_batch_size == args.per_device_train_batch_size:
         logger.info(f"Resumed from checkpoint: {args.resume_from_checkpoint}")
         checkpoint = torch.load(args.resume_from_checkpoint)
         model.load_state_dict(checkpoint['model_state_dict'])
@@ -497,10 +542,11 @@ def run_clm(args):
         # Extract `epoch_{i}` or `step_{i}`
         training_difference = os.path.splitext(os.path.basename(args.resume_from_checkpoint))[0]
 
+        # This needs a rework if we want to support multi-epoch training with variable batch size
         if "epoch" in training_difference:
             starting_epoch = epoch + 1
             resume_step = None
-            completed_steps = starting_epoch * num_update_steps_per_epoch
+            completed_steps = starting_epoch * (math.ceil(len(train_dataloader) / args.gradient_accumulation_steps))
         else:
             # need to multiply `gradient_accumulation_steps` to reflect real steps
             resume_step = int(training_difference.replace("step_", "")) * args.gradient_accumulation_steps
@@ -519,75 +565,101 @@ def run_clm(args):
         total_loss = 0
         if args.resume_from_checkpoint and epoch == starting_epoch and resume_step is not None:
             # We skip the first `n` batches in the dataloader when resuming from a checkpoint
-            active_dataloader = accelerate.data_loader.skip_first_batches(train_dataloader, resume_step)
+            data_loaders = [accelerate.data_loader.skip_first_batches(train_dataloader, resume_step)]
+            # We do not allow resuming from checkpoint when using variable batch size so this is okay for now
         else:
-            active_dataloader = train_dataloader
+            # We need to distinguish between the embedding tuning phase and the full training phase if we use variable
+            # batch size, in the future we will need to support multi-epoch training
+            if (completed_steps < embedding_tuning_steps and embedding_tuning_dataloader is not None
+                    and full_training_dataloader is not None):
+                data_loaders = [embedding_tuning_dataloader, full_training_dataloader]
+            else:
+                data_loaders = [train_dataloader]
         accumulated_loss = 0
-        for step, batch in enumerate(active_dataloader):
-            if transformer_layers_are_frozen and completed_steps >= warmup_and_embedding_training_steps:
-                # unfreeze transformer layers
-                for param in model.gpt_neox.parameters():
-                    param.requires_grad = True
-                # set new learning rate for full training
-                lr_scheduler.base_lrs = [args.full_training_learning_rate for _ in lr_scheduler.base_lrs]
-                transformer_layers_are_frozen = False
-                if args.not_freeze_transformer_layers:
-                    logger.info(f"epoch {epoch}: step {completed_steps}: finish accelerated training")
-                else:
-                    logger.info(f"epoch {epoch}: step {completed_steps}: unfreezing transformer layers")
 
-            batch = {k: v.to(model.device) for k, v in batch.items()}
-            outputs = model(**batch)
-            loss = outputs.loss
-            # loss = loss_function(outputs, targets)
-            loss = loss / args.gradient_accumulation_steps
-            accumulated_loss += loss.detach().float()
-            # We keep track of the loss at each epoch
-            total_loss += loss.detach().float()
-            loss.backward()
-            if ((step + 1) % args.gradient_accumulation_steps == 0) or (step + 1 == len(train_dataloader)):
-                perplexity = math.exp(accumulated_loss)
-                wandb.log({
-                    "train/train_loss": accumulated_loss,
-                    "train/perplexity": perplexity,
-                    "train/lr": optimizer.param_groups[0]["lr"],
-                }, step=completed_steps)
-                accumulated_loss = 0
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
-                optimizer.step()
-                lr_scheduler.step()
-                optimizer.zero_grad()
-                progress_bar.update(1)
-                completed_steps += 1
+        for data_loader in data_loaders:
+            for step, batch in enumerate(data_loader):
+                if transformer_layers_are_frozen and completed_steps >= embedding_tuning_steps:
+                    # unfreeze transformer layers
+                    for param in model.gpt_neox.parameters():
+                        param.requires_grad = True
+                    # set new learning rate for full training
+                    lr_scheduler.base_lrs = [args.full_training_learning_rate for _ in lr_scheduler.base_lrs]
+                    transformer_layers_are_frozen = False
+                    if args.not_freeze_transformer_layers:
+                        logger.info(f"epoch {epoch}: step {completed_steps}: finished accelerated training")
+                    else:
+                        logger.info(f"epoch {epoch}: step {completed_steps}: unfreezing transformer layers")
+                    embedding_tuning = False
 
-                if isinstance(eval_steps, int):
-                    if completed_steps % eval_steps == 0 and completed_steps > 0:
-                        logger.info(f"epoch {epoch}: step {completed_steps}: evaluating model")
-                        eval_loss, perplexity = validate_model(model, eval_dataloader, args.eval_iters)
-                        logger.info(f"epoch {epoch}: step {completed_steps}: perplexity: {perplexity} eval_loss: {eval_loss}")
-                        wandb.log({
-                            "eval/loss": eval_loss,
-                            "eval/perplexity": perplexity,
-                            "consumed_train_tokens":  completed_steps * total_batch_size * args.block_size
-                            }, step=completed_steps)
-                        model.train()
+                batch = {k: v.to(model.device) for k, v in batch.items()}
+                outputs = model(**batch)
+                loss = outputs.loss
+                # loss = loss_function(outputs, targets)
+                loss = loss / args.gradient_accumulation_steps
+                accumulated_loss += loss.detach().float()
+                # We keep track of the loss at each epoch
+                total_loss += loss.detach().float()
+                loss.backward()
+                if ((step + 1) % args.gradient_accumulation_steps == 0) or (step + 1 == len(data_loader)) or \
+                        (embedding_tuning and args.per_device_embedding_tuning_batch_size is not None):
+                    # we do not accumulate gradients for embedding tuning with variable batch size
+                    perplexity = math.exp(accumulated_loss)
+                    if completed_steps < embedding_tuning_steps and embedding_tuning_dataloader is not None:
+                        consumed_train_tokens = completed_steps * args.per_device_embedding_tuning_batch_size * args.block_size
+                    else:
+                        consumed_train_tokens = completed_steps * total_batch_size * args.block_size
+                    wandb.log({
+                        "train/train_loss": accumulated_loss,
+                        "train/perplexity": perplexity,
+                        "train/lr": optimizer.param_groups[0]["lr"],
+                        "train/consumed_train_tokens":  consumed_train_tokens
+                    }, step=completed_steps)
+                    accumulated_loss = 0
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
+                    optimizer.step()
+                    lr_scheduler.step()
+                    optimizer.zero_grad()
+                    progress_bar.update(1)
+                    completed_steps += 1
 
-                if isinstance(checkpointing_steps, int):
-                    if completed_steps > 0 and completed_steps % checkpointing_steps == 0:
-                        logger.info(f"epoch {epoch}: step {completed_steps}: saving checkpoint")
-                        save_checkpoint(
-                            args.output_dir, model, optimizer, lr_scheduler, epoch, loss, completed_steps=completed_steps
-                        )
+                    if isinstance(eval_steps, int):
+                        if completed_steps % eval_steps == 0 and completed_steps > 0:
+                            logger.info(f"epoch {epoch}: step {completed_steps}: evaluating model")
+                            eval_loss, perplexity = validate_model(model, eval_dataloader, args.eval_iters)
+                            logger.info(f"epoch {epoch}: step {completed_steps}: perplexity: {perplexity} eval_loss: {eval_loss}")
+                            if completed_steps < embedding_tuning_steps and embedding_tuning_dataloader is not None:
+                                consumed_train_tokens = completed_steps * args.per_device_embedding_tuning_batch_size * args.block_size
+                            else:
+                                consumed_train_tokens = completed_steps * total_batch_size * args.block_size
+                            wandb.log({
+                                "eval/loss": eval_loss,
+                                "eval/perplexity": perplexity,
+                                "eval/consumed_train_tokens":  consumed_train_tokens
+                                }, step=completed_steps)
+                            model.train()
+
+                    if isinstance(checkpointing_steps, int):
+                        if completed_steps > 0 and completed_steps % checkpointing_steps == 0:
+                            logger.info(f"epoch {epoch}: step {completed_steps}: saving checkpoint")
+                            save_checkpoint(
+                                args.output_dir, model, optimizer, lr_scheduler, epoch, loss, completed_steps=completed_steps
+                            )
 
         if args.eval_steps == "epoch":
             logger.info(f"epoch {epoch}: step {completed_steps}: evaluating model")
             eval_loss, perplexity = validate_model(model, eval_dataloader, model.device)
             logger.info(f"epoch {epoch}: perplexity: {perplexity} eval_loss: {eval_loss}")
+            if embedding_tuning_dataloader is not None and full_training_dataloader is not None:
+                consumed_train_tokens = embedding_tuning_steps * args.per_device_embedding_tuning_batch_size * args.block_size
+                consumed_train_tokens += (completed_steps - embedding_tuning_steps) * total_batch_size * args.block_size
+            else:
+                consumed_train_tokens = completed_steps * total_batch_size * args.block_size
             wandb.log({
                 "eval/loss": eval_loss,
                 "eval/perplexity": perplexity,
                 "train/epoch_loss": total_loss / len(train_dataloader),
-                "consumed_train_tokens": completed_steps * total_batch_size * args.block_size
+                "consumed_train_tokens": consumed_train_tokens
             }, step=completed_steps)
 
         if args.checkpointing_steps == "epoch":
