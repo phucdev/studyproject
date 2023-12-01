@@ -426,15 +426,22 @@ def run_clm(args):
         embedding_tuning_training_data, full_training_data = torch.utils.data.random_split(lm_dataset["train"], [
             embedding_tuning_num_samples, full_training_num_samples])
         embedding_tuning_dataloader = DataLoader(
-            embedding_tuning_training_data, shuffle=True, collate_fn=data_collator, batch_size=args.per_device_embedding_tuning_batch_size
+            embedding_tuning_training_data,
+            shuffle=True,
+            collate_fn=data_collator,
+            batch_size=args.per_device_embedding_tuning_batch_size
         )
         full_training_dataloader = DataLoader(
-            full_training_data, shuffle=True, collate_fn=data_collator, batch_size=args.per_device_train_batch_size
+            full_training_data,
+            shuffle=True,
+            collate_fn=data_collator,
+            batch_size=args.per_device_train_batch_size
         )
     else:
         embedding_tuning_dataloader = None
         full_training_dataloader = None
-    # For multi-epoch training we will need to use a train dataloader of the whole training data or reinitialize the embedding tuning dataloader with the normal training batch size
+    # For multi-epoch training we will need to use a train dataloader of the whole training data or reinitialize
+    # the embedding tuning dataloader with the normal training batch size
     train_dataloader = DataLoader(
         lm_dataset["train"], shuffle=True, collate_fn=data_collator, batch_size=args.per_device_train_batch_size
     )
@@ -499,10 +506,14 @@ def run_clm(args):
         full_training_steps = num_training_steps - embedding_tuning_steps
         full_training_warmup_steps = math.ceil(full_training_steps * args.warmup_percentage / 100)
     # custom lr scheduler with cosine decay and one warmup phase each for the embedding training and the full training
-    lr_scheduler = get_custom_lr_scheduler(optimizer=optimizer, num_training_steps=num_training_steps,
-                                           embedding_tuning_warmup_steps=embedding_tuning_warmup_steps,
-                                           embedding_tuning_steps=embedding_tuning_steps,
-                                           full_training_warmup_steps=full_training_warmup_steps, min_lr=args.min_lr)
+    lr_scheduler = get_custom_lr_scheduler(
+        optimizer=optimizer,
+        num_training_steps=num_training_steps,
+        embedding_tuning_warmup_steps=embedding_tuning_warmup_steps,
+        embedding_tuning_steps=embedding_tuning_steps,
+        full_training_warmup_steps=full_training_warmup_steps,
+        min_lr=args.min_lr
+    )
 
     checkpointing_steps = args.checkpointing_steps
     if checkpointing_steps is not None and checkpointing_steps.isdigit():
@@ -531,7 +542,7 @@ def run_clm(args):
     embedding_tuning = True
 
     # Potentially load in the weights and states from a previous save
-    if args.resume_from_checkpoint is not None and args.per_device_embedding_tuning_batch_size == args.per_device_train_batch_size:
+    if args.resume_from_checkpoint is not None and args.per_device_embedding_tuning_batch_size is None:
         logger.info(f"Resumed from checkpoint: {args.resume_from_checkpoint}")
         checkpoint = torch.load(args.resume_from_checkpoint)
         model.load_state_dict(checkpoint['model_state_dict'])
