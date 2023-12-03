@@ -129,7 +129,7 @@ def parse_args():
         help="Number of updates steps to accumulate before performing a backward/update pass.",
     )
     parser.add_argument(
-        "--pure_embedding_training_percentage",
+        "--embedding_tuning_percentage",
         type=int,
         default=0,
         help="Percentage of training steps to train only the embedding layer."
@@ -467,6 +467,7 @@ def run_clm(args):
     train_dataloader = DataLoader(
         lm_dataset["train"], shuffle=True, collate_fn=data_collator, batch_size=args.per_device_train_batch_size
     )
+
     # we shuffle to get a new random sample each time we evaluate for eval_iters
     eval_dataloader = DataLoader(
         lm_dataset["validation"], shuffle=True, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size
@@ -477,16 +478,16 @@ def run_clm(args):
     model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path, config=config)
     logger.info(f"Loaded model {args.model_name_or_path}")
 
-    if args.pure_embedding_training_percentage > 0:
+    if args.embedding_tuning_percentage > 0:
         if args.not_freeze_transformer_layers:  # for testing purposes
-            logger.info(f"Accelerated training for {args.pure_embedding_training_percentage}% of training steps without freezing transformer layers")
+            logger.info(f"Accelerated training for {args.embedding_tuning_percentage}% of training steps without freezing transformer layers")
         else:
             # freeze transformer layer to only train embeddings, the language modeling head (embed_out) is not affected
             for param in model.gpt_neox.parameters():
                 param.requires_grad = False
             # unfreeze word embeddings
             model.gpt_neox.embed_in.weight.requires_grad = True
-            logger.info(f"Freezing transformer layers for {args.pure_embedding_training_percentage}% of training steps")
+            logger.info(f"Freezing transformer layers for {args.embedding_tuning_percentage}% of training steps")
         transformer_layers_are_frozen = True
     else:
         transformer_layers_are_frozen = False
@@ -509,14 +510,18 @@ def run_clm(args):
     # LR Scheduler
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
     num_training_steps = args.num_train_epochs * num_update_steps_per_epoch
+    embedding_tuning_steps = math.ceil(num_training_steps * args.embedding_tuning_percentage / 100)
+    embedding_tuning_warmup_steps = math.ceil(embedding_tuning_steps * args.embedding_tuning_warmup_percentage / 100)
+    full_training_steps = num_training_steps - embedding_tuning_steps
+    full_training_warmup_steps = math.ceil(full_training_steps * args.warmup_percentage / 100)
     # custom lr scheduler with cosine decay and one warmup phase each for the embedding training and the full training
     lr_scheduler = get_custom_lr_scheduler(
         optimizer=optimizer,
-        warmup_percentage=args.warmup_percentage,
         num_training_steps=num_training_steps,
-        pure_embedding_training_percentage=args.pure_embedding_training_percentage,
-        min_lr=args.min_lr,
-        embedding_tuning_warmup_percentage=args.embedding_tuning_warmup_percentage
+        embedding_tuning_warmup_steps=embedding_tuning_warmup_steps,
+        embedding_tuning_steps=embedding_tuning_steps,
+        full_training_warmup_steps=full_training_warmup_steps,
+        min_lr=args.min_lr
     )
     logger.info(f"num_training_steps: {num_training_steps} before accelerator.prepare")
 
@@ -528,9 +533,7 @@ def run_clm(args):
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
     num_training_steps = args.num_train_epochs * num_update_steps_per_epoch
-    pure_embedding_training_steps = math.ceil(num_training_steps * args.pure_embedding_training_percentage / 100)
-    warmup_embedding_steps = math.ceil(pure_embedding_training_steps * args.embedding_tuning_warmup_percentage / 100)
-    warmup_and_embedding_training_steps = warmup_embedding_steps + pure_embedding_training_steps
+    embedding_tuning_steps = math.ceil(num_training_steps * args.embedding_tuning_percentage / 100)
     # Afterwards we recalculate our number of training epochs
     args.num_train_epochs = math.ceil(num_training_steps / num_update_steps_per_epoch)
     logger.info(f"num_training_steps: {num_training_steps} after accelerator.prepare")
@@ -568,6 +571,7 @@ def run_clm(args):
     consumed_train_tokens = 0
 
     # Potentially load in the weights and states from a previous save
+    resume_step = None
     if args.resume_from_checkpoint is not None:
         logger.info(f"Resumed from checkpoint: {args.resume_from_checkpoint}")
         checkpoint_path = args.resume_from_checkpoint
@@ -603,7 +607,7 @@ def run_clm(args):
         else:
             active_dataloader = train_dataloader
         for step, batch in enumerate(active_dataloader):
-            if transformer_layers_are_frozen and completed_steps >= warmup_and_embedding_training_steps:
+            if transformer_layers_are_frozen and completed_steps >= embedding_tuning_steps:
                 accelerator.wait_for_everyone()
                 # unfreeze transformer layers
                 if isinstance(model, torch.nn.parallel.DistributedDataParallel):
