@@ -628,7 +628,7 @@ def run_clm(args):
                 else:
                     logger.info(f"epoch {epoch}: step {completed_steps}: unfreezing transformer layers")
 
-            if ((step + 1) % args.gradient_accumulation_steps != 0) and (step + 1 == len(active_dataloader)):
+            if ((step + 1) % args.gradient_accumulation_steps != 0) and (step + 1 < len(active_dataloader)):
                 # Gradients only accumulate
                 with accelerator.no_sync(model):
                     outputs = model(**batch)
