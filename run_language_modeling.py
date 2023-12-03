@@ -627,7 +627,19 @@ def run_clm(args):
                     logger.info(f"epoch {epoch}: step {completed_steps}: finish accelerated training")
                 else:
                     logger.info(f"epoch {epoch}: step {completed_steps}: unfreezing transformer layers")
-            with accelerator.accumulate(model):
+
+            if ((step + 1) % args.gradient_accumulation_steps != 0) and (step + 1 == len(active_dataloader)):
+                # Gradients only accumulate
+                with accelerator.no_sync(model):
+                    outputs = model(**batch)
+                    loss = outputs.loss
+                    train_step_loss = loss.detach().float()
+                    batch_loss += train_step_loss / accelerator.gradient_accumulation_steps
+                    # We keep track of the loss at each epoch
+                    total_loss += train_step_loss
+                    accelerator.backward(loss)
+            else:
+                # Gradients sync when we call .backward()
                 outputs = model(**batch)
                 loss = outputs.loss
                 train_step_loss = loss.detach().float()
@@ -635,14 +647,11 @@ def run_clm(args):
                 # We keep track of the loss at each epoch
                 total_loss += train_step_loss
                 accelerator.backward(loss)
-                if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
+                accelerator.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
 
-            # Checks if the accelerator has performed an optimization step behind the scenes
-            if accelerator.sync_gradients:
                 progress_bar.update(1)
                 completed_steps += 1
                 if args.with_tracking and accelerator.is_main_process:
