@@ -13,7 +13,7 @@
     "beta2": 0.95,
     "grad_clip": 1.0,
     "gradient_accumulation_steps": 2,
-    "pure_embedding_training_percentage": 0,
+    "embedding_tuning_percentage": 0,
     "warmup_percentage": 10,
     "num_train_epochs": 1,
     "block_size": 1024,
