@@ -624,7 +624,7 @@ def run_clm(args):
                         "train/train_loss": accumulated_loss,
                         "train/perplexity": perplexity,
                         "train/lr": optimizer.param_groups[0]["lr"],
-                        "train/consumed_train_tokens":  consumed_train_tokens
+                        "consumed_train_tokens":  consumed_train_tokens
                     }, step=completed_steps)
                     accumulated_loss = 0
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
@@ -646,7 +646,7 @@ def run_clm(args):
                             wandb.log({
                                 "eval/loss": eval_loss,
                                 "eval/perplexity": perplexity,
-                                "eval/consumed_train_tokens":  consumed_train_tokens
+                                "consumed_train_tokens":  consumed_train_tokens
                                 }, step=completed_steps)
                             model.train()
 
