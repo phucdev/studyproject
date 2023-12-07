@@ -590,7 +590,7 @@ def run_clm(args):
 
         for data_loader in data_loaders:
             for step, batch in enumerate(data_loader):
-                if transformer_layers_are_frozen and completed_steps >= embedding_tuning_steps:
+                if transformer_layers_are_frozen and completed_steps + 1 >= embedding_tuning_steps:
                     # unfreeze transformer layers
                     for param in model.gpt_neox.parameters():
                         param.requires_grad = True
