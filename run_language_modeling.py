@@ -607,7 +607,7 @@ def run_clm(args):
         else:
             active_dataloader = train_dataloader
         for step, batch in enumerate(active_dataloader):
-            if transformer_layers_are_frozen and completed_steps >= embedding_tuning_steps:
+            if transformer_layers_are_frozen and completed_steps + 1 >= embedding_tuning_steps:
                 accelerator.wait_for_everyone()
                 # unfreeze transformer layers
                 if isinstance(model, torch.nn.parallel.DistributedDataParallel):
@@ -664,7 +664,7 @@ def run_clm(args):
                         "train/loss": train_loss,
                         "train/perplexity": train_perplexity,
                         "train/lr": optimizer.param_groups[0]["lr"],
-                        "consumed_train_tokens": completed_steps * total_batch_size * args.block_size   # TODO this might not be accurate
+                        "consumed_train_tokens": completed_steps * total_batch_size * args.block_size
                     }
                     progress_bar.set_postfix(log_dict)
                     accelerator.log(log_dict, step=completed_steps)
