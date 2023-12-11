@@ -135,7 +135,9 @@ def parse_args():
         help="The LR scheduler type to use.",
         choices=[
             "cosine_schedule_with_warmup_embedding_tuning",
+            "unified_cosine_schedule_with_warmup_embedding_tuning",
             "mixed_schedule_with_warmup_embedding_tuning",
+            "constant_schedule_with_warmup_embedding_tuning",
             "cosine_schedule_with_warmup",
         ],
     )
@@ -168,7 +170,13 @@ def parse_args():
         "--warmup_percentage",
         type=int,
         default=10,
-        help="Percentage of training steps to warmup to the learning rate."
+        help="Percentage of full training steps to warmup to the learning rate."
+    )
+    parser.add_argument(
+        "--calculate_warmup_based_on_num_train_steps",
+        action="store_true",
+        default=False,
+        help="If set to True, we calculate the warmup percentages based on the number of training steps."
     )
     parser.add_argument(
         "--num_train_epochs",
@@ -529,9 +537,13 @@ def run_clm(args):
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
     num_training_steps = args.num_train_epochs * num_update_steps_per_epoch
     embedding_tuning_steps = math.ceil(num_training_steps * args.embedding_tuning_percentage / 100)
-    embedding_tuning_warmup_steps = math.ceil(embedding_tuning_steps * args.embedding_tuning_warmup_percentage / 100)
     full_training_steps = num_training_steps - embedding_tuning_steps
-    full_training_warmup_steps = math.ceil(full_training_steps * args.warmup_percentage / 100)
+    if args.calculate_warmup_based_on_num_train_steps:
+        embedding_tuning_warmup_steps = math.ceil(num_training_steps * args.embedding_tuning_warmup_percentage / 100)
+        full_training_warmup_steps = math.ceil(num_training_steps * args.warmup_percentage / 100)
+    else:
+        embedding_tuning_warmup_steps = math.ceil(embedding_tuning_steps * args.embedding_tuning_warmup_percentage / 100)
+        full_training_warmup_steps = math.ceil(full_training_steps * args.warmup_percentage / 100)
     if args.set_embedding_tuning_denominator:
         embedding_tuning_denominator = num_training_steps - embedding_tuning_warmup_steps
     else:

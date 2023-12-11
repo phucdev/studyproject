@@ -165,6 +165,29 @@ def _get_mixed_schedule_with_warmup_embedding_tuning_lr_lambda(
     return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress * float(num_cycles) * 2.0)))
 
 
+def _get_constant_schedule_with_warmup_embedding_tuning_lr_lambda(
+    current_step: int, *, embedding_tuning_steps: int, embedding_tuning_warmup_steps: int,
+    full_training_warmup_steps: int
+):
+    full_training_start_step = embedding_tuning_steps + full_training_warmup_steps
+
+    # embedding training warmup phase
+    if current_step < embedding_tuning_warmup_steps:
+        return float(current_step) / float(max(1, embedding_tuning_warmup_steps))
+
+    # pure embedding training phase: constant
+    elif embedding_tuning_warmup_steps <= current_step < embedding_tuning_steps:
+        return 1.0
+
+    # full training phase warmup phase
+    elif embedding_tuning_steps <= current_step < full_training_start_step:
+        return float(current_step - embedding_tuning_steps) / float(max(1, full_training_warmup_steps))
+
+    # full training
+    else:
+        return 1.0
+
+
 def _get_cosine_schedule_with_warmup_lr_lambda(
         current_step: int, *, warmup_steps: int, num_training_steps: int, num_cycles: float):
     if current_step < warmup_steps:
@@ -197,10 +220,25 @@ def get_custom_lr_scheduler(optimizer, num_training_steps: int, embedding_tuning
             full_training_warmup_steps=full_training_warmup_steps,
             num_cycles=num_cycles
         )
+    elif lr_scheduler_type == "constant_schedule_with_warmup_embedding_tuning":
+        lr_lambda = partial(
+            _get_constant_schedule_with_warmup_embedding_tuning_lr_lambda,
+            embedding_tuning_warmup_steps=embedding_tuning_warmup_steps,
+            embedding_tuning_steps=embedding_tuning_steps,
+            full_training_warmup_steps=full_training_warmup_steps
+        )
     elif lr_scheduler_type == "cosine_schedule_with_warmup":
         lr_lambda = partial(
             _get_cosine_schedule_with_warmup_lr_lambda,
             warmup_steps=full_training_warmup_steps,
+            num_training_steps=num_training_steps,
+            num_cycles=num_cycles
+        )
+    elif lr_scheduler_type == "unified_cosine_schedule_with_warmup_embedding_tuning":
+        # in this scenario we still have an embedding tuning phase, but we do not have a separate lr schedule for it
+        lr_lambda = partial(
+            _get_cosine_schedule_with_warmup_lr_lambda,
+            warmup_steps=embedding_tuning_warmup_steps,
             num_training_steps=num_training_steps,
             num_cycles=num_cycles
         )
