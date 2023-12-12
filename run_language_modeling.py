@@ -771,6 +771,24 @@ def run_clm(args):
                 output_dir = os.path.join(args.output_dir, output_dir)
             accelerator.save_state(output_dir)
 
+    if args.eval_steps != "epoch":
+        # Evaluate on the whole validation split at the end of training
+        logger.info(f"End of training: step {completed_steps}: evaluating model")
+        eval_loss, perplexity = validate_model(
+            model, eval_dataloader, accelerator, args.per_device_eval_batch_size
+        )
+        logger.info(f"End of training: perplexity: {perplexity} loss: {eval_loss}")
+        if args.with_tracking:
+            accelerator.log(
+                {
+                    "test/perplexity": perplexity,
+                    "test/loss": eval_loss,
+                    "test/step": completed_steps,
+                    "test/consumed_train_tokens": completed_steps * total_batch_size * args.block_size
+                },
+                step=completed_steps,
+            )
+
     if args.with_tracking:
         accelerator.end_training()
 
