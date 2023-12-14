@@ -110,9 +110,12 @@ class CustomLambdaLR(LRScheduler):
 
 def _get_cosine_schedule_with_warmup_embedding_tuning_lr_lambda(
         current_step: int, *, num_training_steps: int, embedding_tuning_steps: int, embedding_tuning_warmup_steps: int,
-        full_training_warmup_steps: int, num_cycles: float, embedding_tuning_denominator: int = None
+        full_training_warmup_steps: int, num_cycles: float, embedding_tuning_denominator: int = None,
+        embedding_tuning_num_cycles: float = None
 ):
     full_training_start_step = embedding_tuning_steps + full_training_warmup_steps
+    if embedding_tuning_num_cycles is None:
+        embedding_tuning_num_cycles = num_cycles
 
     # embedding training warmup phase
     if current_step < embedding_tuning_warmup_steps:
@@ -126,6 +129,7 @@ def _get_cosine_schedule_with_warmup_embedding_tuning_lr_lambda(
         else:
             denominator = float(max(1,embedding_tuning_denominator))
         progress = numerator / denominator
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress * float(embedding_tuning_num_cycles) * 2.0)))
 
     # full training phase warmup phase
     elif embedding_tuning_steps <= current_step < full_training_start_step:
@@ -136,7 +140,7 @@ def _get_cosine_schedule_with_warmup_embedding_tuning_lr_lambda(
         numerator = float(current_step - full_training_start_step)
         denominator = float(max(1, num_training_steps - full_training_start_step))
         progress = numerator / denominator
-    return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress * float(num_cycles) * 2.0)))
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress * float(num_cycles) * 2.0)))
 
 
 def _get_mixed_schedule_with_warmup_embedding_tuning_lr_lambda(
@@ -200,7 +204,7 @@ def get_custom_lr_scheduler(optimizer, num_training_steps: int, embedding_tuning
                             embedding_tuning_steps:int = 0, full_training_warmup_steps: int = 0,
                             num_cycles: float = 0.5, min_lr: float = 0.0,
                             lr_scheduler_type: str = "cosine_schedule_with_warmup_embedding_tuning",
-                            embedding_tuning_denominator: int = None):
+                            embedding_tuning_denominator: int = None, embedding_tuning_num_cycles: float = None):
     if lr_scheduler_type == "cosine_schedule_with_warmup_embedding_tuning":
         lr_lambda = partial(
             _get_cosine_schedule_with_warmup_embedding_tuning_lr_lambda,
@@ -209,7 +213,8 @@ def get_custom_lr_scheduler(optimizer, num_training_steps: int, embedding_tuning
             embedding_tuning_steps=embedding_tuning_steps,
             full_training_warmup_steps=full_training_warmup_steps,
             num_cycles=num_cycles,
-            embedding_tuning_denominator=embedding_tuning_denominator
+            embedding_tuning_denominator=embedding_tuning_denominator,
+            embedding_tuning_num_cycles=embedding_tuning_num_cycles
         )
     elif lr_scheduler_type == "mixed_schedule_with_warmup_embedding_tuning":
         lr_lambda = partial(

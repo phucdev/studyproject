@@ -116,7 +116,14 @@ def parse_args():
         "--full_training_learning_rate",
         type=float,
         default=1e-4,
-        help="Initial learning rate (after the potential warmup period) to use for the full training.",)
+        help="Initial learning rate (after the potential warmup period) to use for the full training."
+    )
+    parser.add_argument(
+        "--embedding_tuning_num_cycles",
+        type=float,
+        default=None,
+        help="Number of cycles for cosine decay to calculate lr for the embedding tuning phase."
+    )
     parser.add_argument("--min_lr", type=float, default=0.0, help="Minimum learning rate during training.")
     parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay to use.")
     parser.add_argument("--beta1", type=float, default=0.9, help="Adam beta1.")
@@ -557,7 +564,8 @@ def run_clm(args):
         full_training_warmup_steps=full_training_warmup_steps,
         min_lr=args.min_lr,
         lr_scheduler_type=args.lr_scheduler_type,
-        embedding_tuning_denominator=embedding_tuning_denominator
+        embedding_tuning_denominator=embedding_tuning_denominator,
+        embedding_tuning_num_cycles=args.embedding_tuning_num_cycles
     )
     logger.info(f"num_training_steps: {num_training_steps} before accelerator.prepare")
 
@@ -643,7 +651,8 @@ def run_clm(args):
         else:
             active_dataloader = train_dataloader
         for step, batch in enumerate(active_dataloader):
-            if transformer_layers_are_frozen and completed_steps + 1 >= embedding_tuning_steps:
+            if (transformer_layers_are_frozen and args.embedding_tuning_percentage < 100 and
+                    completed_steps + 1 >= embedding_tuning_steps):
                 accelerator.wait_for_everyone()
                 # unfreeze transformer layers
                 if isinstance(model, torch.nn.parallel.DistributedDataParallel):
