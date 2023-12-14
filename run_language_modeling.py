@@ -124,7 +124,14 @@ def parse_args():
         "--full_training_learning_rate",
         type=float,
         default=1e-4,
-        help="Initial learning rate (after the potential warmup period) to use for the full training.",)
+        help="Initial learning rate (after the potential warmup period) to use for the full training."
+    )
+    parser.add_argument(
+        "--embedding_tuning_num_cycles",
+        type=float,
+        default=None,
+        help="Number of cycles for cosine decay to calculate lr for the embedding tuning phase."
+    )
     parser.add_argument("--min_lr", type=float, default=0.0, help="Minimum learning rate during training.")
     parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay to use.")
     parser.add_argument("--beta1", type=float, default=0.9, help="Adam beta1.")
@@ -137,10 +144,30 @@ def parse_args():
         help="Number of updates steps to accumulate before performing a backward/update pass.",
     )
     parser.add_argument(
+        "--lr_scheduler_type",
+        type=str,
+        default="cosine_schedule_with_warmup_embedding_tuning",
+        help="The LR scheduler type to use.",
+        choices=[
+            "cosine_schedule_with_warmup_embedding_tuning",
+            "unified_cosine_schedule_with_warmup_embedding_tuning",
+            "mixed_schedule_with_warmup_embedding_tuning",
+            "constant_schedule_with_warmup_embedding_tuning",
+            "cosine_schedule_with_warmup",
+        ],
+    )
+    parser.add_argument(
         "--embedding_tuning_percentage",
         type=int,
         default=0,
         help="Percentage of training steps to train only the embedding layer."
+    )
+    parser.add_argument(
+        "--set_embedding_tuning_denominator",
+        action="store_true",
+        default=False,
+        help="Whether to set the denominator for the embedding tuning phase to the total number of training steps "
+             "minus the embedding tuning warmup steps."
     )
     parser.add_argument(
         "--not_freeze_transformer_layers",
@@ -158,7 +185,13 @@ def parse_args():
         "--warmup_percentage",
         type=int,
         default=10,
-        help="Percentage of training steps to warmup to the learning rate."
+        help="Percentage of full training steps to warmup to the learning rate."
+    )
+    parser.add_argument(
+        "--calculate_warmup_based_on_num_train_steps",
+        action="store_true",
+        default=False,
+        help="If set to True, we calculate the warmup percentages based on the number of training steps."
     )
     parser.add_argument(
         "--num_train_epochs",
@@ -502,9 +535,19 @@ def run_clm(args):
         num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
         num_training_steps = args.num_train_epochs * num_update_steps_per_epoch
         embedding_tuning_steps = math.ceil(num_training_steps * args.embedding_tuning_percentage / 100)
-        embedding_tuning_warmup_steps = math.ceil(embedding_tuning_steps * args.embedding_tuning_warmup_percentage / 100)
         full_training_steps = num_training_steps - embedding_tuning_steps
-        full_training_warmup_steps = math.ceil(full_training_steps * args.warmup_percentage / 100)
+        if args.calculate_warmup_based_on_num_train_steps:
+            embedding_tuning_warmup_steps = math.ceil(
+                num_training_steps * args.embedding_tuning_warmup_percentage / 100)
+            full_training_warmup_steps = math.ceil(num_training_steps * args.warmup_percentage / 100)
+        else:
+            embedding_tuning_warmup_steps = math.ceil(
+                embedding_tuning_steps * args.embedding_tuning_warmup_percentage / 100)
+            full_training_warmup_steps = math.ceil(full_training_steps * args.warmup_percentage / 100)
+    if args.set_embedding_tuning_denominator:
+        embedding_tuning_denominator = num_training_steps - embedding_tuning_warmup_steps
+    else:
+        embedding_tuning_denominator = None
     # custom lr scheduler with cosine decay and one warmup phase each for the embedding training and the full training
     lr_scheduler = get_custom_lr_scheduler(
         optimizer=optimizer,
@@ -512,7 +555,10 @@ def run_clm(args):
         embedding_tuning_warmup_steps=embedding_tuning_warmup_steps,
         embedding_tuning_steps=embedding_tuning_steps,
         full_training_warmup_steps=full_training_warmup_steps,
-        min_lr=args.min_lr
+        min_lr=args.min_lr,
+        lr_scheduler_type=args.lr_scheduler_type,
+        embedding_tuning_denominator=embedding_tuning_denominator,
+        embedding_tuning_num_cycles=args.embedding_tuning_num_cycles
     )
 
     checkpointing_steps = args.checkpointing_steps
@@ -676,6 +722,24 @@ def run_clm(args):
         if args.checkpointing_steps == "epoch":
             logger.info(f"epoch {epoch}: step {completed_steps}: saving checkpoint")
             save_checkpoint(args.output_dir, model, optimizer, lr_scheduler, epoch, loss)
+
+    if args.eval_steps != "epoch":
+        # Evaluate on the whole validation split at the end of training
+        logger.info(f"End of training: step {completed_steps}: evaluating model")
+        eval_loss, perplexity = validate_model(
+            model, eval_dataloader
+        )
+        logger.info(f"End of training: perplexity: {perplexity} loss: {eval_loss}")
+        if args.with_tracking:
+            wandb.log(
+                {
+                    "test/perplexity": perplexity,
+                    "test/loss": eval_loss,
+                    "test/step": completed_steps,
+                    "test/consumed_train_tokens": completed_steps * total_batch_size * args.block_size
+                },
+                step=completed_steps,
+            )
 
     model.save_pretrained(args.output_dir)
     tokenizer.save_pretrained(args.output_dir)
