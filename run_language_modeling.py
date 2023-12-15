@@ -730,16 +730,15 @@ def run_clm(args):
             model, eval_dataloader
         )
         logger.info(f"End of training: perplexity: {perplexity} loss: {eval_loss}")
-        if args.with_tracking:
-            wandb.log(
-                {
-                    "test/perplexity": perplexity,
-                    "test/loss": eval_loss,
-                    "test/step": completed_steps,
-                    "test/consumed_train_tokens": completed_steps * total_batch_size * args.block_size
-                },
-                step=completed_steps,
-            )
+        wandb.log(
+            {
+                "test/perplexity": perplexity,
+                "test/loss": eval_loss,
+                "test/step": completed_steps,
+                "test/consumed_train_tokens": completed_steps * total_batch_size * args.block_size
+            },
+            step=completed_steps,
+        )
 
     model.save_pretrained(args.output_dir)
     tokenizer.save_pretrained(args.output_dir)
