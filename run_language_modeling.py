@@ -663,9 +663,9 @@ def run_clm(args):
                     # we do not accumulate gradients for embedding tuning with variable batch size
                     perplexity = math.exp(accumulated_loss)
                     if completed_steps < embedding_tuning_steps and embedding_tuning_dataloader is not None:
-                        consumed_train_tokens = completed_steps * args.per_device_embedding_tuning_batch_size * args.block_size
+                        consumed_train_tokens += args.per_device_embedding_tuning_batch_size * args.block_size
                     else:
-                        consumed_train_tokens = completed_steps * total_batch_size * args.block_size
+                        consumed_train_tokens += total_batch_size * args.block_size
                     wandb.log({
                         "train/train_loss": accumulated_loss,
                         "train/perplexity": perplexity,
@@ -685,10 +685,6 @@ def run_clm(args):
                             logger.info(f"epoch {epoch}: step {completed_steps}: evaluating model")
                             eval_loss, perplexity = validate_model(model, eval_dataloader, args.eval_iters)
                             logger.info(f"epoch {epoch}: step {completed_steps}: perplexity: {perplexity} eval_loss: {eval_loss}")
-                            if completed_steps < embedding_tuning_steps and embedding_tuning_dataloader is not None:
-                                consumed_train_tokens = completed_steps * args.per_device_embedding_tuning_batch_size * args.block_size
-                            else:
-                                consumed_train_tokens = completed_steps * total_batch_size * args.block_size
                             wandb.log({
                                 "eval/loss": eval_loss,
                                 "eval/perplexity": perplexity,
@@ -707,11 +703,6 @@ def run_clm(args):
             logger.info(f"epoch {epoch}: step {completed_steps}: evaluating model")
             eval_loss, perplexity = validate_model(model, eval_dataloader, model.device)
             logger.info(f"epoch {epoch}: perplexity: {perplexity} eval_loss: {eval_loss}")
-            if embedding_tuning_dataloader is not None and full_training_dataloader is not None:
-                consumed_train_tokens = embedding_tuning_steps * args.per_device_embedding_tuning_batch_size * args.block_size
-                consumed_train_tokens += (completed_steps - embedding_tuning_steps) * total_batch_size * args.block_size
-            else:
-                consumed_train_tokens = completed_steps * total_batch_size * args.block_size
             wandb.log({
                 "eval/loss": eval_loss,
                 "eval/perplexity": perplexity,
@@ -735,7 +726,7 @@ def run_clm(args):
                 "test/perplexity": perplexity,
                 "test/loss": eval_loss,
                 "test/step": completed_steps,
-                "test/consumed_train_tokens": completed_steps * total_batch_size * args.block_size
+                "test/consumed_train_tokens": consumed_train_tokens
             },
             step=completed_steps,
         )
