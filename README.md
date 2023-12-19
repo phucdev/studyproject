@@ -40,7 +40,7 @@ To apply CLP-Transfer, you need a large source model (e.g., in English) and a sm
 # source: same size as target model but different language/multilingual
 python clp.py apply_clp \
     --source_model_name_or_path EleutherAI/pythia-410m \
-    --helper_model_name_or_path malteos/gpt2-wechsel-german-ds-me \
+    --helper_model_name_or_path malteos/gpt2-wechsel-german-ds-meg \
     --target_model_path <output_dir>
 ```
 
