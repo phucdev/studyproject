@@ -546,8 +546,14 @@ def run_clm(args):
     embedding_tuning_steps = math.ceil(num_training_steps * args.embedding_tuning_percentage / 100)
     full_training_steps = num_training_steps - embedding_tuning_steps
     if args.calculate_warmup_based_on_num_train_steps:
-        embedding_tuning_warmup_steps = math.ceil(num_training_steps * args.embedding_tuning_warmup_percentage / 100)
-        full_training_warmup_steps = math.ceil(num_training_steps * args.warmup_percentage / 100)
+        if args.embedding_tuning_percentage == 0:
+            embedding_tuning_warmup_steps = 0
+        else:
+            embedding_tuning_warmup_steps = math.ceil(num_training_steps * args.embedding_tuning_warmup_percentage / 100)
+        if args.embedding_tuning_percentage == 100:
+            full_training_warmup_steps = 0
+        else:
+            full_training_warmup_steps = math.ceil(num_training_steps * args.warmup_percentage / 100)
     else:
         embedding_tuning_warmup_steps = math.ceil(embedding_tuning_steps * args.embedding_tuning_warmup_percentage / 100)
         full_training_warmup_steps = math.ceil(full_training_steps * args.warmup_percentage / 100)
