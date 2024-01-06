@@ -75,25 +75,26 @@ accelerate launch run_language_modeling.py --experiment_config=configs/oscar_de_
 
 
 ### Evaluation
-
-#### Perplexity
-
-
-
-````bash
-TODO
-````
-
-
-
-#### Performance on downstream tasks
-
+Models are all trained using the huggingface transformers library. We use the lm-evaluation-harness to evaluate the 
+models on downstream tasks.
 https://github.com/OpenGPTX/lm-evaluation-harness
 
+Clone the repository:
+```bash
+git clone https://github.com/OpenGPTX/lm-evaluation-harness.git
+```
+Change into the repository and install the `lm-eval` package:
 ````bash
-TODO
+pip install git+https://github.com/OpenGPTX/lm-evaluation-harness.git
 ````
-
+Then you can run the evaluation with:
+````bash
+main.py --model hf \
+  --model_args pretrained=../studyproject/results/oscar_de_embedding_tuning_v2 \
+  --no_tokenizer_check \
+  --tasks ogx_germeval2017,ogx_germeval2018_coarse,ogx_gnad10,ogx_xnli_de,ogx_pawsx_de,ogx_xstance_de \
+  --output_path logs/oscar_de_embedding_tuning_v2.log
+````
 
 
 ## References
