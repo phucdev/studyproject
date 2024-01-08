@@ -667,7 +667,7 @@ def run_clm(args):
                     else:
                         consumed_train_tokens += total_batch_size * args.block_size
                     wandb.log({
-                        "train/train_loss": accumulated_loss,
+                        "train/loss": accumulated_loss,
                         "train/perplexity": perplexity,
                         "train/lr": optimizer.param_groups[0]["lr"],
                         "consumed_train_tokens":  consumed_train_tokens
