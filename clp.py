@@ -10,6 +10,7 @@ Adapted from https://github.com/malteos/clp-transfer/blob/main/clp.py
 import sys
 import logging
 import os
+import math
 import torch
 import numpy as np
 from transformers import AutoModelForCausalLM, AutoModelForMaskedLM, AutoTokenizer
@@ -26,13 +27,29 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def xavier_normal(tensor):
+    """Fills the input Tensor with values according to the method described in Understanding the difficulty of
+    training deep feedforward neural networks - Glorot, X. & Bengio, Y. (2010), using a normal distribution."""
+    return torch.nn.init.xavier_normal_(tensor)
+
+
+def small_init(tensor, dim):
+    """Fills the input Tensor with values according to the method described in Transformers without Tears: Improving
+    the Normalization of Self-Attention - Nguyen, T. & Salazar, J. (2010), using a normal distribution."""
+    # dim is hidden size: in our case it is 1024 for pythia-410m
+    std = math.sqrt(2 / (5 * dim))
+    return torch.nn.init.normal_(tensor, mean=0.0, std=std)
+
+
 def apply_clp(
         source_model_name_or_path, 
         helper_model_name_or_path,  
         target_model_path, 
         helper_tokenizer_name_or_path = None,
         seed=42,
-        override: bool = False
+        override: bool = False,
+        random_init: bool = False,
+        random_init_method: str = None
     ):
     """
 
@@ -104,46 +121,54 @@ def apply_clp(
     logger.info(f'{overlapping_token_vecs.shape=}')
 
     # Target embeddings
-
-    # Random init target embeddings with mean+std of source embeddings
     np.random.seed(seed)
-    target_embeddings = np.random.normal(
-        np.mean(source_embeddings, axis=0), 
-        np.std(source_embeddings, axis=0), 
-        (
-            len(target_tokens), 
-            source_embeddings.shape[1]
-        )
-    )
-
-    # Set overlapping tokens
-    for t in overlapping_tokens:
-        target_embeddings[helper_token_to_idx[t]] = source_embeddings[source_token_to_idx[t]]        
-
-    # TODO possible modifications:
-    #  use method from https://github.com/wietsedv/gpt2-recycle to transform smaller token embeddings to larger ones
-    #  normalizations?
-    if missing_tokens:
-            
-        helper_missing_tokens_vecs = helper_embeddings[[helper_token_to_idx[t] for t in missing_tokens_list], :]
-        helper_overlapping_token_vecs = helper_embeddings[[helper_token_to_idx[t] for t in overlapping_tokens_list], :]
-
-        # Similarities for missing tokens
-        sims = cosine_similarity(helper_missing_tokens_vecs, helper_overlapping_token_vecs)
-
-        # similar = 1 => high weight
-        # dissimilar = 0 => low weight
-
-        for ti, t in enumerate(tqdm(missing_tokens_list)):  # 1:14hrs (12min with batch sim)
-            # distances to overlapping tokens
-            token_sims = sims[ti] 
-            norm_sims = token_sims / token_sims.sum()
-            
-            # weighted average of overlapping token embeddings with weight from similarity in helper token embedding space
-            target_vec = np.average(overlapping_token_vecs, axis=0, weights=norm_sims)
-            target_embeddings[helper_token_to_idx[t]] = target_vec
+    if random_init:
+        logger.info(f'Use randomly initialized target embeddings')
+        # Random init target embeddings with mean+std of source embeddings
+        if random_init_method == 'xavier':
+            target_embeddings = xavier_normal(torch.empty(len(target_tokens), source_embeddings.shape[1])).numpy()
+        elif random_init_method == 'small_init':
+            target_embeddings = small_init(torch.empty(len(target_tokens), source_embeddings.shape[1]), source_embeddings.shape[1]).numpy()
+        else:
+            target_embeddings = np.random.normal(size=(len(target_tokens), source_embeddings.shape[1]))
     else:
-        logger.warning('No missing tokens')
+        # Random init target embeddings with mean+std of source embeddings
+        target_embeddings = np.random.normal(
+            np.mean(source_embeddings, axis=0),
+            np.std(source_embeddings, axis=0),
+            (
+                len(target_tokens),
+                source_embeddings.shape[1]
+            )
+        )
+        # Set overlapping tokens
+        for t in overlapping_tokens:
+            target_embeddings[helper_token_to_idx[t]] = source_embeddings[source_token_to_idx[t]]
+
+        # TODO possible modifications:
+        #  use method from https://github.com/wietsedv/gpt2-recycle to transform smaller token embeddings to larger ones
+        #  normalizations?
+        if missing_tokens:
+
+            helper_missing_tokens_vecs = helper_embeddings[[helper_token_to_idx[t] for t in missing_tokens_list], :]
+            helper_overlapping_token_vecs = helper_embeddings[[helper_token_to_idx[t] for t in overlapping_tokens_list], :]
+
+            # Similarities for missing tokens
+            sims = cosine_similarity(helper_missing_tokens_vecs, helper_overlapping_token_vecs)
+
+            # similar = 1 => high weight
+            # dissimilar = 0 => low weight
+
+            for ti, t in enumerate(tqdm(missing_tokens_list)):  # 1:14hrs (12min with batch sim)
+                # distances to overlapping tokens
+                token_sims = sims[ti]
+                norm_sims = token_sims / token_sims.sum()
+
+                # weighted average of overlapping token embeddings with weight from similarity in helper token embedding space
+                target_vec = np.average(overlapping_token_vecs, axis=0, weights=norm_sims)
+                target_embeddings[helper_token_to_idx[t]] = target_vec
+        else:
+            logger.warning('No missing tokens')
 
     # Save target model
     target_model = source_model
