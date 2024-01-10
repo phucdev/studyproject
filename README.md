@@ -44,6 +44,18 @@ python clp.py apply_clp \
     --target_model_path <output_dir>
 ```
 
+If you want to get a model with randomly initialized embeddings instead, you can use the `--random_init` flag. 
+For our experiments we used the small initialization method from Transformers without Tears: Improving
+    the Normalization of Self-Attention - Nguyen, T. & Salazar, J. (2010), using a normal distribution.
+```bash
+python clp.py apply_clp \
+    --source_model_name_or_path EleutherAI/pythia-410m \
+    --helper_model_name_or_path malteos/gpt2-wechsel-german-ds-meg \
+    --target_model_path <output_dir> \
+    --random_init \
+    --random_init_method small_init
+```
+
 ### Pretraining
 
 To train a model on the causal language modeling objective, run:
@@ -72,6 +84,9 @@ Then you can launch the script with `accelerate launch`. A complete example woul
 ```bash
 accelerate launch run_language_modeling.py --experiment_config=configs/oscar_de_embedding_tuning.json --with_tracking --report_to=wandb
 ```
+
+There are several configuration files in the `configs` folder for convenience. In order to reproduce our experiments,
+we additionally provide training scripts in the `scripts` folder.
 
 
 ### Evaluation

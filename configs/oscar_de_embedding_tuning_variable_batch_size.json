@@ -14,6 +14,6 @@
     "preprocessing_num_workers": 4,
     "device": "cuda",
     "seed": 42,
-    "eval_steps": "20",
+    "eval_steps": "300",
     "eval_iters": 50
 }
