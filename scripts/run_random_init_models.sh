@@ -1,7 +1,7 @@
 # Baseline CLP (0% embedding tuning, only full model training)
-accelerate launch ../run_language_modeling.py \
-  --experiment_config=../configs/wikitext_de_random_init.json \
-  --output_dir=../outputs/wikitext_de_baseline_random_init \
+accelerate launch ./run_language_modeling.py \
+  --experiment_config=./configs/wikitext_de_random_init.json \
+  --output_dir=./outputs/wikitext_de_baseline_random_init \
   --with_tracking \
   --report_to=wandb \
   --project_name=CLP_wikitext_de \
@@ -18,9 +18,9 @@ accelerate launch ../run_language_modeling.py \
   --calculate_warmup_based_on_num_train_steps
 
 # Embedding Tuning (only train the embedding layer at the start with a high learning rate)
-accelerate launch ../run_language_modeling.py \
-  --experiment_config=../configs/wikitext_de_random_init.json \
-  --output_dir=../outputs/wikitext_de_embedding_tuning_random_init \
+accelerate launch ./run_language_modeling.py \
+  --experiment_config=./configs/wikitext_de_random_init.json \
+  --output_dir=./outputs/wikitext_de_embedding_tuning_random_init \
   --with_tracking \
   --report_to=wandb \
   --project_name=CLP_wikitext_de \
@@ -55,9 +55,9 @@ CUDA_VISIBLE_DEVICES=0 python ./run_variable_batch_size_lm.py \
   --per_device_embedding_tuning_batch_size=1
 
 # Baseline CLP (0% embedding tuning, only full model training)
-accelerate launch ../run_language_modeling.py \
-  --experiment_config=../configs/oscar_de_random_init.json \
-  --output_dir=../outputs/oscar_de_baseline_random_init \
+accelerate launch ./run_language_modeling.py \
+  --experiment_config=./configs/oscar_de_random_init.json \
+  --output_dir=./outputs/oscar_de_baseline_random_init \
   --with_tracking \
   --report_to=wandb \
   --project_name=CLP_oscar_de \
@@ -74,9 +74,9 @@ accelerate launch ../run_language_modeling.py \
   --calculate_warmup_based_on_num_train_steps
 
 # Embedding Tuning (only train the embedding layer at the start with a high learning rate)
-accelerate launch ../run_language_modeling.py \
-  --experiment_config=../configs/oscar_de_random_init.json \
-  --output_dir=../outputs/oscar_de_embedding_tuning_random_init \
+accelerate launch ./run_language_modeling.py \
+  --experiment_config=./configs/oscar_de_random_init.json \
+  --output_dir=./outputs/oscar_de_embedding_tuning_random_init \
   --with_tracking \
   --report_to=wandb \
   --project_name=CLP_oscar_de \
