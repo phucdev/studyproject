@@ -58,6 +58,7 @@ CUDA_VISIBLE_DEVICES=0 python ./run_variable_batch_size_lm.py \
 accelerate launch ./run_language_modeling.py \
   --experiment_config=./configs/oscar_de_random_init.json \
   --output_dir=./outputs/oscar_de_baseline_random_init \
+  --preprocessed_dataset_path=./data/oscar_de/preprocessed_random_init \
   --with_tracking \
   --report_to=wandb \
   --project_name=CLP_oscar_de \
@@ -77,6 +78,7 @@ accelerate launch ./run_language_modeling.py \
 accelerate launch ./run_language_modeling.py \
   --experiment_config=./configs/oscar_de_random_init.json \
   --output_dir=./outputs/oscar_de_embedding_tuning_random_init \
+  --preprocessed_dataset_path=./data/oscar_de/preprocessed_random_init \
   --with_tracking \
   --report_to=wandb \
   --project_name=CLP_oscar_de \
@@ -96,6 +98,7 @@ accelerate launch ./run_language_modeling.py \
 CUDA_VISIBLE_DEVICES=0 python ./run_variable_batch_size_lm.py \
   --experiment_config=./configs/oscar_de_random_init.json \
   --output_dir=./outputs/oscar_de_variable_batch_size_random_init_et_denominator \
+  --preprocessed_dataset_path=./data/oscar_de/preprocessed_random_init \
   --project_name=CLP_wikitext_de \
   --per_device_train_batch_size=16 \
   --per_device_eval_batch_size=16 \

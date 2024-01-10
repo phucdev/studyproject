@@ -2,6 +2,7 @@
 accelerate launch ./run_language_modeling.py \
   --experiment_config=./configs/oscar_de_experiments.json \
   --output_dir=./outputs/oscar_de_baseline \
+  --preprocessed_dataset_path=./data/oscar_de/preprocessed \
   --with_tracking \
   --report_to=wandb \
   --project_name=CLP_oscar_de \
@@ -19,6 +20,7 @@ accelerate launch ./run_language_modeling.py \
   --experiment_config=./configs/oscar_de_experiments.json \
   --output_dir=./outputs/oscar_de_embedding_tuning \
   --preprocessed_dataset_path=./data/oscar_de/preprocessed \
+  --preprocessed_dataset_path=./data/oscar_de/preprocessed \
   --with_tracking \
   --report_to=wandb \
   --project_name=CLP_oscar_de \
@@ -35,6 +37,7 @@ accelerate launch ./run_language_modeling.py \
 accelerate launch ./run_language_modeling.py \
   --experiment_config=./configs/oscar_de_experiments.json \
   --output_dir=./outputs/oscar_de_accelerated_training_start \
+  --preprocessed_dataset_path=./data/oscar_de/preprocessed \
   --with_tracking \
   --report_to=wandb \
   --project_name=CLP_oscar_de \
@@ -52,6 +55,7 @@ accelerate launch ./run_language_modeling.py \
 accelerate launch ./run_language_modeling.py \
   --experiment_config=./configs/oscar_de_experiments.json \
   --output_dir=./outputs/oscar_de_frozen_transformer_layers \
+  --preprocessed_dataset_path=./data/oscar_de/preprocessed \
   --with_tracking \
   --report_to=wandb \
   --project_name=CLP_oscar_de \
@@ -68,6 +72,7 @@ accelerate launch ./run_language_modeling.py \
 CUDA_VISIBLE_DEVICES=0 python ./run_variable_batch_size_lm.py \
   --experiment_config=./configs/oscar_de_embedding_tuning_variable_batch_size.json \
   --output_dir=./outputs/oscar_de_variable_batch_size_et_denominator \
+  --preprocessed_dataset_path=./data/oscar_de/preprocessed \
   --project_name=CLP_oscar_de \
   --warmup_percentage=10 \
   --embedding_tuning_warmup_percentage=10 \
@@ -83,6 +88,7 @@ CUDA_VISIBLE_DEVICES=0 python ./run_variable_batch_size_lm.py \
 CUDA_VISIBLE_DEVICES=0 python ./run_variable_batch_size_lm.py \
   --experiment_config=./configs/oscar_de_embedding_tuning_variable_batch_size.json \
   --output_dir=./outputs/oscar_de_variable_batch_size_accelerated_training_start_et_denominator \
+  --preprocessed_dataset_path=./data/oscar_de/preprocessed \
   --project_name=CLP_oscar_de \
   --warmup_percentage=10 \
   --embedding_tuning_warmup_percentage=10 \
