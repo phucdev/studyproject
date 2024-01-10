@@ -389,7 +389,7 @@ def run_clm(args):
     if args.block_size is None:
         args.block_size = tokenizer.model_max_length
 
-    if args.preprocessed_dataset_path is not None:
+    if args.preprocessed_dataset_path is not None and os.path.exists(args.preprocessed_dataset_path):
         lm_dataset = datasets.load_from_disk(args.preprocessed_dataset_path)
         logger.info(f"Loaded preprocessed dataset from {args.preprocessed_dataset_path}")
     else:
@@ -479,6 +479,9 @@ def run_clm(args):
             if args.save_preprocessed_dataset_path is not None:
                 lm_dataset.save_to_disk(args.save_preprocessed_dataset_path)
                 logger.info(f"Saved preprocessed dataset to {args.save_preprocessed_dataset_path}")
+            elif args.preprocessed_dataset_path is not None and not os.path.exists(args.preprocessed_dataset_path):
+                lm_dataset.save_to_disk(args.preprocessed_dataset_path)
+                logger.info(f"Saved preprocessed dataset to {args.preprocessed_dataset_path}")
 
     with accelerator.main_process_first():
         lm_dataset.set_format("torch")
