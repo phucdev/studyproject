@@ -564,18 +564,27 @@ def run_clm(args):
         embedding_tuning_denominator = num_training_steps - embedding_tuning_warmup_steps
     else:
         embedding_tuning_denominator = None
-    # custom lr scheduler with cosine decay and one warmup phase each for the embedding training and the full training
-    lr_scheduler = get_custom_lr_scheduler(
-        optimizer=optimizer,
-        num_training_steps=num_training_steps,
-        embedding_tuning_warmup_steps=embedding_tuning_warmup_steps,
-        embedding_tuning_steps=embedding_tuning_steps,
-        full_training_warmup_steps=full_training_warmup_steps,
-        min_lr=args.min_lr,
-        lr_scheduler_type=args.lr_scheduler_type,
-        embedding_tuning_denominator=embedding_tuning_denominator,
-        embedding_tuning_num_cycles=args.embedding_tuning_num_cycles
-    )
+    if full_training_steps == 0:
+        # 100% embedding tuning
+        lr_scheduler = get_custom_lr_scheduler(
+            optimizer=optimizer,
+            num_training_steps=num_training_steps,
+            full_training_warmup_steps=embedding_tuning_warmup_steps,
+            min_lr=args.min_lr,
+            lr_scheduler_type="cosine_schedule_with_warmup"
+        )
+    else:
+        lr_scheduler = get_custom_lr_scheduler(
+            optimizer=optimizer,
+            num_training_steps=num_training_steps,
+            embedding_tuning_warmup_steps=embedding_tuning_warmup_steps,
+            embedding_tuning_steps=embedding_tuning_steps,
+            full_training_warmup_steps=full_training_warmup_steps,
+            min_lr=args.min_lr,
+            lr_scheduler_type=args.lr_scheduler_type,
+            embedding_tuning_denominator=embedding_tuning_denominator,
+            embedding_tuning_num_cycles=args.embedding_tuning_num_cycles
+        )
     logger.info(f"num_training_steps: {num_training_steps} before accelerator.prepare")
 
     # Prepare everything with our `accelerator`.
@@ -725,7 +734,7 @@ def run_clm(args):
                     batch_loss = 0
 
                 if isinstance(eval_steps, int):
-                    if completed_steps % eval_steps == 0 and completed_steps > 0:
+                    if completed_steps % eval_steps == 0:
                         logger.info(f"epoch {epoch}: step {completed_steps}: evaluating model")
                         eval_loss, perplexity = validate_model(
                             model, eval_dataloader, accelerator, args.per_device_eval_batch_size, args.eval_iters

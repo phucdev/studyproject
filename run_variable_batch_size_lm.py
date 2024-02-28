@@ -328,6 +328,7 @@ def validate_model(model, eval_dataloader, eval_iters=None):
     return eval_loss, perplexity
 
 def run_clm(args):
+    # torch.set_float32_matmul_precision('high')
     wandb.init(
         project=args.project_name,
         config=vars(args),
@@ -489,7 +490,7 @@ def run_clm(args):
 
     # Load pretrained model
     config = AutoConfig.from_pretrained(args.model_name_or_path)
-    model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path, config=config)
+    model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path, config=config).to(args.device)
     logger.info(f"Loaded model {args.model_name_or_path}")
 
     if args.embedding_tuning_percentage > 0:
@@ -506,7 +507,7 @@ def run_clm(args):
     else:
         transformer_layers_are_frozen = False
 
-    model.to(args.device)
+    # model = torch.compile(model)
 
     # Optimizer
     # Split weights in two groups, one with weight decay and the other not.
@@ -684,13 +685,15 @@ def run_clm(args):
                     completed_steps += 1
 
                     if isinstance(eval_steps, int):
-                        if completed_steps % eval_steps == 0 and completed_steps > 0:
+                        if completed_steps % eval_steps == 0:
                             logger.info(f"epoch {epoch}: step {completed_steps}: evaluating model")
                             eval_loss, perplexity = validate_model(model, eval_dataloader, args.eval_iters)
                             logger.info(f"epoch {epoch}: step {completed_steps}: perplexity: {perplexity} eval_loss: {eval_loss}")
                             wandb.log({
                                 "eval/loss": eval_loss,
                                 "eval/perplexity": perplexity,
+                                "epoch": epoch,
+                                "step": completed_steps,
                                 "consumed_train_tokens":  consumed_train_tokens
                                 }, step=completed_steps)
                             model.train()
@@ -710,6 +713,8 @@ def run_clm(args):
                 "eval/loss": eval_loss,
                 "eval/perplexity": perplexity,
                 "train/epoch_loss": total_loss / len(train_dataloader),
+                "epoch": epoch,
+                "step": completed_steps,
                 "consumed_train_tokens": consumed_train_tokens
             }, step=completed_steps)
 
