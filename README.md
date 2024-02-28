@@ -1,4 +1,4 @@
-# Efficient Cross-Lingual and Progressive Transfer Learning
+# Study project: Efficient Cross-Lingual and Progressive Transfer Learning
 
 This study project is based on the CLP-Transfer method by Ostendorff and Rehm (2023), that transfers models from a source language, for which pretrained models are publicly available, like English, to a new target language while leveraging a small pretrained model in the target language as a helper model. 
 
@@ -14,7 +14,19 @@ This study project is based on the CLP-Transfer method by Ostendorff and Rehm (2
 }
 ```
 
-We aim to improve upon the CLP-Transfer method through several modifications. 
+We investigate several modifications to the CLP-Transfer method by
+Ostendorff and Rehm (2023) to see whether we can create a more effective pre-training
+regime, where (1) the model’s perplexity decreases more quickly during training thereby
+reducing the training time and the memory footprint and (2) the validation perplexity of
+the model at the end of training is improved over regular pre-training. In particular, we
+explore freezing the transformer layers and exclusively training the newly initialized token 
+embeddings with a higher learning rate first for a percentage of training and then
+continue training the full model. This approach may help the model adapt to the newly
+initialized token embeddings and prevent catastrophic forgetting in the transformer layers
+(de Vries and Nissim, 2021). We explore different learning rate schedules, where we 
+vary the warmup, the learning rate decay for each phase of training. We also experiment
+with different embedding tuning percentages and variable batch size training, where we
+only use a small batch size for the embedding tuning. 
 
 
 ## Usage
@@ -33,7 +45,9 @@ python prepare_oscar.py \
 
 ### CLP
 
+The code for CLP-Transfer embedding initialization is taken from the original repository at: https://github.com/malteos/clp-transfer
 To apply CLP-Transfer, you need a large source model (e.g., in English) and a small model in your target language.
+
 
 ```bash
 # helper: other model in target language but with same tokenizer (smaller or other architecture)
@@ -44,6 +58,7 @@ python clp.py apply_clp \
     --target_model_path <output_dir>
 ```
 
+We added the option to use randomly initialized embeddings for the target model.
 If you want to get a model with randomly initialized embeddings instead, you can use the `--random_init` flag. 
 For our experiments we used the small initialization method from Transformers without Tears: Improving
     the Normalization of Self-Attention - Nguyen, T. & Salazar, J. (2010), using a normal distribution.
@@ -85,6 +100,12 @@ Then you can launch the script with `accelerate launch`. A complete example woul
 accelerate launch run_language_modeling.py --experiment_config=configs/oscar_de_embedding_tuning.json --with_tracking --report_to=wandb
 ```
 
+For our experiments with variable batch size training we used a PyTorch only training script. This was easier to implement 
+without having to adapt to the multi-GPU logic of the `accelerate` library.
+```bash
+python run_variable_batch_size_lm.py --experiment_config=configs/oscar_de_embedding_tuning_variable_batch_size.json
+```
+
 There are several configuration files in the `configs` folder for convenience. In order to reproduce our experiments,
 we additionally provide training scripts in the `scripts` folder.
 
@@ -105,15 +126,11 @@ pip install git+https://github.com/OpenGPTX/lm-evaluation-harness.git
 Then you can run the evaluation with:
 ````bash
 main.py --model hf \
-  --model_args pretrained=../studyproject/results/oscar_de_embedding_tuning_v2 \
+  --model_args pretrained=<model_path> \
   --no_tokenizer_check \
-  --tasks ogx_germeval2017,ogx_germeval2018_coarse,ogx_gnad10,ogx_xnli_de,ogx_pawsx_de,ogx_xstance_de \
-  --output_path logs/oscar_de_embedding_tuning_v2.log
+  --tasks ogx_oscar_ppl_de,ogx_germeval2017,ogx_germeval2018_coarse,ogx_gnad10,ogx_xnli_de,ogx_pawsx_de,ogx_xstance_de \
+  --output_path <output_path>
 ````
-
-
-## References
-
 
 
 ## License
